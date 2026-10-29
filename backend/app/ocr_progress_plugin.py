@@ -9,6 +9,19 @@ from ocrmypdf import hookimpl
 from ocrmypdf.builtin_plugins.tesseract_ocr import TesseractOcrEngine
 
 
+def _write_page_state(data):
+    progress_file = os.environ.get("PDFDESK_OCR_PROGRESS_FILE")
+    if not progress_file:
+        return
+    path = Path(progress_file)
+    temp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    try:
+        temp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(temp, path)
+    except OSError:
+        temp.unlink(missing_ok=True)
+
+
 class PdfDeskProgress:
     def __init__(self, *, total=None, desc=None, unit=None, **_kwargs):
         self.path = os.environ.get("PDFDESK_OCR_PROGRESS_FILE")
@@ -31,22 +44,8 @@ class PdfDeskProgress:
     def _save(self):
         if not self.path:
             return
-        path = Path(self.path)
         data = {"stage": self.desc, "completed": self.completed, "total": self.total, "unit": self.unit}
-        self._write_page_state(data)
-
-    @classmethod
-    def _write_page_state(cls, data):
-        progress_file = os.environ.get("PDFDESK_OCR_PROGRESS_FILE")
-        if not progress_file:
-            return
-        path = Path(progress_file)
-        temp = path.with_name(path.name + f".{os.getpid()}.tmp")
-        try:
-            temp.write_text(json.dumps(data), encoding="utf-8")
-            os.replace(temp, path)
-        except OSError:
-            temp.unlink(missing_ok=True)
+        _write_page_state(data)
 
 
 class PdfDeskTesseractEngine(TesseractOcrEngine):
@@ -57,12 +56,12 @@ class PdfDeskTesseractEngine(TesseractOcrEngine):
         page = int(match.group(1)) if match else None
         total = int(os.environ.get("PDFDESK_OCR_TOTAL_PAGES", "0")) or None
         if page is not None:
-            self._write_page_state({"stage": "OCR", "active_page": page, "total": total})
+            _write_page_state({"stage": "OCR", "active_page": page, "total": total})
         try:
             return super().generate_hocr(input_file, output_hocr, output_text, options)
         finally:
             if page is not None:
-                self._write_page_state({"stage": "OCR", "last_page": page, "total": total})
+                _write_page_state({"stage": "OCR", "last_page": page, "total": total})
 
 
 @hookimpl
