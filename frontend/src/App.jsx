@@ -7,7 +7,7 @@ export default function App() {
   const [checked, setChecked] = useState(false);
 
   useEffect(() => {
-    if (!getToken()) return setChecked(true);
+    // Always ask: the Windows desktop app needs no login and answers even without a token
     api.me().then(setMe).catch(() => setToken("")).finally(() => setChecked(true));
   }, []);
 
@@ -50,6 +50,14 @@ const blobToDataUrl = (blob) => new Promise((res) => { const r = new FileReader(
 const imgSize = (url) => new Promise((res) => { const i = new Image(); i.onload = () => res([i.naturalWidth, i.naturalHeight]); i.src = url; });
 
 function Shell({ me, reloadMe, onLogout }) {
+  // Windows desktop app: tell the program this window is still open (it quits when the pings stop)
+  useEffect(() => {
+    if (!me.desktop) return;
+    const ping = () => fetch("/api/ping").catch(() => {});
+    ping();
+    const t = setInterval(ping, 5000);
+    return () => clearInterval(t);
+  }, [me.desktop]);
   const [doc, setDoc] = useState(null);
   const [tool, setTool] = useState("view");
   const [zoom, setZoom] = useState(1.2);
@@ -311,14 +319,14 @@ function Shell({ me, reloadMe, onLogout }) {
       { label: "Undo", key: "Ctrl+Z", on: undo, off: !has || doc.version <= 1 },
       { label: "Redo", key: "Ctrl+Y", on: redo, off: !has || doc.version >= doc.top },
       { sep: true },
-      { label: "Share…", on: () => setDialog("share"), off: !has },
-      { label: "Copy link to this document", on: () => navigator.clipboard.writeText(`${location.origin}/#doc=${doc.id}`).then(() => say("Link copied (colleagues need access — use Share)")), off: !has },
+      { label: "Share…", on: () => setDialog("share"), off: !has, hide: me.desktop },
+      { label: "Copy link to this document", hide: me.desktop, on: () => navigator.clipboard.writeText(`${location.origin}/#doc=${doc.id}`).then(() => say("Link copied (colleagues need access — use Share)")), off: !has },
       { label: "Document properties…", on: () => setDialog("props"), off: !has },
       { sep: true },
       { label: "Close file", on: closeDoc, off: !has },
       { sep: true },
-      { label: "Change my password…", on: () => setDialog("password") },
-      { label: `Sign out (${me.user})`, on: onLogout },
+      { label: "Change my password…", on: () => setDialog("password"), hide: me.desktop },
+      { label: `Sign out (${me.user})`, on: onLogout, hide: me.desktop },
     ],
     Edit: [
       { label: "Undo", key: "Ctrl+Z", on: undo, off: !has || doc.version <= 1 },
@@ -372,9 +380,9 @@ function Shell({ me, reloadMe, onLogout }) {
         <span className="grow" />
         {doc && <span className="muted docname" title={doc.name}>{doc.name}</span>}
         {doc && <button className="primary" onClick={save}>Save</button>}
-        {me.role === "admin" && <button className={tool === "users" ? "active" : ""} onClick={() => setTool("users")}>Users</button>}
-        {me.role === "admin" && <button className={tool === "audit" ? "active" : ""} onClick={() => setTool("audit")}>Audit log</button>}
-        <span className="muted" title={`Signed in as ${me.user} (${me.role})`}>{me.user} · {me.role}</span>
+        {me.role === "admin" && !me.desktop && <button className={tool === "users" ? "active" : ""} onClick={() => setTool("users")}>Users</button>}
+        {me.role === "admin" && !me.desktop && <button className={tool === "audit" ? "active" : ""} onClick={() => setTool("audit")}>Audit log</button>}
+        {!me.desktop && <span className="muted" title={`Signed in as ${me.user} (${me.role})`}>{me.user} · {me.role}</span>}
       </header>
       {pending && <div className="findbar pastebar">Click on the page to place the pasted {pending.kind}. <button onClick={() => setPending(null)}>Cancel</button></div>}
       <div className="main">
@@ -410,6 +418,17 @@ function Shell({ me, reloadMe, onLogout }) {
   );
 }
 
+// drop hidden items, then any separator that ended up first, last or doubled
+function tidy(items) {
+  const out = [];
+  for (const it of items.filter((i) => !i.hide)) {
+    if (it.sep && (!out.length || out[out.length - 1].sep)) continue;
+    out.push(it);
+  }
+  if (out.length && out[out.length - 1].sep) out.pop();
+  return out;
+}
+
 function MenuBar({ menus }) {
   const [open, setOpen] = useState(null);
   const ref = useRef();
@@ -426,7 +445,7 @@ function MenuBar({ menus }) {
             onMouseEnter={() => open && setOpen(name)}>{name}</button>
           {open === name && (
             <div className="dropdown">
-              {items.map((it, k) => it.sep ? <hr key={k} /> : (
+              {tidy(items).map((it, k) => it.sep ? <hr key={k} /> : (
                 <button key={k} disabled={it.off} onClick={() => { setOpen(null); it.on(); }}>
                   <span>{it.label}</span><span className="muted">{it.key || it.hint || ""}</span>
                 </button>

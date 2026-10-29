@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 from typing import Any
 
@@ -84,7 +85,8 @@ def login(body: Login, request: Request):
 
 @app.get("/api/me")
 def me(u: dict = U):
-    return {"user": u["user"], "role": u["role"], "must_change": u["must_change"], "ocr": pdfops.ocr_available(),
+    return {"user": u["user"], "role": u["role"], "must_change": u["must_change"], "desktop": config.DESKTOP,
+            "ocr": pdfops.ocr_available(),
             "ocr_langs": config.OCR_LANGS, "ai_summary": bool(config.ANTHROPIC_API_KEY), "stamps": pdfops.STAMPS}
 
 
@@ -634,12 +636,21 @@ def health():
     return {"ok": True}
 
 
+@app.get("/api/ping")
+def ping():
+    """Desktop app: the open window pings every few seconds; when it stops, the program quits."""
+    config.LAST_PING = time.time()
+    return {"ok": True}
+
+
 # ---------- frontend ----------
-_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+_dist = config.STATIC_DIR.resolve()
 if _dist.exists():
     app.mount("/assets", StaticFiles(directory=_dist / "assets"), name="assets")
 
     @app.get("/{path:path}")
     def spa(path: str):
-        f = _dist / path
-        return FileResponse(f if path and f.is_file() else _dist / "index.html")
+        f = (_dist / path).resolve()
+        if path and f.is_file() and _dist in f.parents:  # never serve anything outside the web folder
+            return FileResponse(f)
+        return FileResponse(_dist / "index.html")

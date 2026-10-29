@@ -16,6 +16,10 @@ Self-hosted PDF tool (Adobe Acrobat alternative): FastAPI + PyMuPDF + OCRmyPDF b
 
 **Big files (500–900 pages):** the server keeps the open document in memory between clicks, edits copy the file and append only the change (≈0.5 s on a 190 MB file), pages render on demand as JPEG, and the browser draws only the pages near the one on screen. OCR and Compress run as background jobs with elapsed time, progress, cancel, and an optional page range (e.g. `1-50`); if the document is edited while a job runs, the result is saved as a separate document instead of overwriting the edits. Find stops at 2000 matches. Undo history is capped at 30 steps and `PDFDESK_HISTORY_MB` (default 1500) per document. Use 3+ CPU cores and 4+ GB RAM for 900-page scans; set `PDFDESK_WORKERS` (default 3), `PDFDESK_OCR_JOBS` (cores per OCR run).
 
+## Windows desktop app (single user, no server)
+`D:\PDFDesk-Setup.exe` installs PDFDesk on one PC: Start Menu / desktop shortcut, its own window (Edge app mode), **no login**, everything stays in `%LOCALAPPDATA%\PDFDesk` (uninstall keeps your documents). The installer also installs the OCR engine (Tesseract, English) if the PC doesn't have it. Closing the window quits the program. Needs 64-bit Windows 10/11 with Microsoft Edge or Chrome.
+Rebuild it with `packaging\build.ps1` (see the header of that file for the one-time prerequisites). The installer is not code-signed, so Windows SmartScreen shows "Unknown publisher" the first time (More info → Run anyway). Multi-user features (Users, Audit log, Share, sign-in) exist only in the server version.
+
 ## Run (production, Docker)
 ```
 docker compose up -d --build

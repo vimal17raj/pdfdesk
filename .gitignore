@@ -1,3 +1,7 @@
+dist-win/
+build-win/
+packaging/vendor/
+*.spec.bak
 node_modules/
 dist/
 .venv/

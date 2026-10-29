@@ -43,6 +43,8 @@ def current_user(
 ) -> dict:
     token = creds.credentials if creds else request.query_params.get("token")
     if not token:
+        if config.DESKTOP:  # single-user desktop app: the person at this PC is the owner
+            return {"user": "me", "role": "admin", "must_change": False, "ip": "127.0.0.1"}
         raise HTTPException(401, "Not authenticated")
     try:
         data = jwt.decode(token, config.JWT_SECRET, algorithms=["HS256"])

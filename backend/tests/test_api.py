@@ -358,6 +358,26 @@ def test_user_management():
     assert {"user_created", "user_updated", "user_deleted", "password_changed", "login_locked"} <= acts
 
 
+def test_static_files_cannot_escape():
+    for p in ("..%2f..%2fapp%2fconfig.py", "%2e%2e/%2e%2e/backend/app/config.py", "../app/config.py"):
+        r = c.get("/" + p)
+        assert b"JWT_SECRET" not in r.content, p
+
+
+def test_desktop_mode_needs_no_login():
+    import app.config as cfg
+    assert c.get("/api/me").status_code == 401
+    cfg.DESKTOP = True
+    try:
+        me = c.get("/api/me").json()
+        assert me["desktop"] is True and me["role"] == "admin" and me["must_change"] is False
+        i = c.post("/api/docs", files={"file": ("t.pdf", make_pdf(1))}).json()["id"]  # no Authorization header
+        assert c.get(f"/api/docs/{i}/page/0.png?zoom=1").status_code == 200
+    finally:
+        cfg.DESKTOP = False
+    assert c.get("/api/me").status_code == 401
+
+
 def test_other_user_blocked():
     h = auth()
     r = c.post("/api/docs", files={"file": ("t.pdf", make_pdf(1))}, headers=h)

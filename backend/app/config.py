@@ -4,6 +4,11 @@ from pathlib import Path
 DATA_DIR = Path(os.getenv("PDFDESK_DATA", Path(__file__).resolve().parents[1] / "data"))
 DOCS_DIR = DATA_DIR / "docs"
 DB_PATH = DATA_DIR / "audit.db"
+# Windows desktop app: one person on their own PC. No login; the server only listens on 127.0.0.1.
+DESKTOP = os.getenv("PDFDESK_DESKTOP") == "1"
+LAST_PING = 0.0  # desktop app: time of the last heartbeat from the open window
+STATIC_DIR = Path(os.getenv("PDFDESK_STATIC") or Path(__file__).resolve().parents[2] / "frontend" / "dist")
+
 JOBS_DIR = DATA_DIR / "jobs"
 TMP_DIR = DATA_DIR / "tmp"
 for _d in (DOCS_DIR, JOBS_DIR, TMP_DIR):
