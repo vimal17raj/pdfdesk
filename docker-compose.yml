@@ -1,0 +1,16 @@
+services:
+  pdfdesk:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"   # only nginx on the same host can reach it
+    volumes:
+      - ./data:/data
+    environment:
+      PDFDESK_JWT_SECRET: "put-a-long-random-string-here-at-least-32-chars"
+      # Used ONCE, on the very first start, to create the 'admin' account.
+      # Admin must choose a new password at first sign-in. Add other users in the app (Users button).
+      PDFDESK_ADMIN_PASSWORD: "ChangeMe-First-Login-123"
+      PDFDESK_OCR_LANGS: "eng"
+      # Optional AI summaries (document text is sent to Anthropic when set). Empty = offline summaries.
+      ANTHROPIC_API_KEY: ""
