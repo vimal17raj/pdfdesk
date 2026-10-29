@@ -101,6 +101,16 @@ def test_streamed_upload_has_no_size_limit():
     assert cfg.MAX_UPLOAD_MB == 0
     r = c.post("/api/docs/raw?name=raw.pdf", headers=h, content=data)  # the file itself is the request body
     assert r.status_code == 200 and r.json()["pages"] == 3 and r.json()["name"] == "raw.pdf"
+    # Large browser uploads use independent raw chunks so a proxy's per-request cap cannot reject the whole PDF.
+    upload_id = "a" * 32
+    first = data[: max(1, len(data) // 2)]
+    second = data[len(first):]
+    r = c.post(f"/api/docs/chunk?upload_id={upload_id}&name=chunks.pdf&offset=0&total={len(data)}&final=false",
+               headers=h, content=first)
+    assert r.status_code == 200 and r.json()["received"] == len(first)
+    r = c.post(f"/api/docs/chunk?upload_id={upload_id}&name=chunks.pdf&offset={len(first)}&total={len(data)}&final=true",
+               headers=h, content=second)
+    assert r.status_code == 200 and r.json()["pages"] == 3 and r.json()["name"] == "chunks.pdf"
     # multipart still works, and a configured limit is enforced while streaming
     assert c.post("/api/docs", headers=h, files={"file": ("m.pdf", data)}).status_code == 200
     cfg.MAX_UPLOAD_MB = 0.0001
@@ -446,9 +456,22 @@ def test_new_tools():
     assert c.post(f"/api/docs/{i}/pages", headers=h, json={"op": "reverse"}).status_code == 200
 
     # protect -> reopen with password
-    r = c.post(f"/api/docs/{i}/protect", headers=h, json={"user_password": "s3cret", "allow_copy": False})
+    r = c.post(f"/api/docs/{i}/protect", headers=h, json={"user_password": "s3cret", "allow_print": False,
+                                                           "allow_copy": False, "allow_edit": False})
     assert r.status_code == 200
     enc = r.content
+    protected = pymupdf.open(stream=enc, filetype="pdf")
+    assert protected.needs_pass and protected.authenticate("s3cret")
+    assert not protected.permissions & (pymupdf.PDF_PERM_PRINT | pymupdf.PDF_PERM_COPY | pymupdf.PDF_PERM_MODIFY)
+    protected.close()
+    allowed = c.post(f"/api/docs/{i}/protect", headers=h,
+                     json={"user_password": "s3cret", "allow_print": True, "allow_copy": True, "allow_edit": True})
+    assert allowed.status_code == 200
+    protected = pymupdf.open(stream=allowed.content, filetype="pdf")
+    assert protected.authenticate("s3cret")
+    assert protected.permissions & (pymupdf.PDF_PERM_PRINT | pymupdf.PDF_PERM_COPY | pymupdf.PDF_PERM_MODIFY) == (
+        pymupdf.PDF_PERM_PRINT | pymupdf.PDF_PERM_COPY | pymupdf.PDF_PERM_MODIFY)
+    protected.close()
     assert c.post("/api/docs", headers=h, files={"file": ("p.pdf", enc)}).json()["detail"] == "PASSWORD_REQUIRED"
     assert c.post("/api/docs", headers=h, data={"password": "bad"}, files={"file": ("p.pdf", enc)}).status_code == 400
     r = c.post("/api/docs", headers=h, data={"password": "s3cret"}, files={"file": ("p.pdf", enc)})

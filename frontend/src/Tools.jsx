@@ -424,7 +424,7 @@ function ProtectPanel({ doc, say }) {
         onClick={() => download(`/api/docs/${doc.id}/protect`, "POST", v, "protected.pdf").then(() => say("Protected copy downloaded")).catch((e) => say(e.message, true))}>
         Protect & download copy
       </button>
-      <p className="muted">AES-256 encryption. Your working copy here stays unprotected so you can keep editing. Passwords are not stored — if lost they cannot be recovered.</p>
+      <p className="muted">AES-256 encrypted copy. The PDF open here stays unprotected; use the downloaded copy to apply these settings. Print/copy restrictions are permission flags that compatible PDF readers may enforce, not DRM, and some tools can ignore them. Passwords are not stored — if lost they cannot be recovered.</p>
     </div>
   );
 }

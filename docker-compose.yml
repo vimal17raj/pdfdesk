@@ -12,6 +12,7 @@ services:
       # Admin must choose a new password at first sign-in. Add other users in the app (Users button).
       PDFDESK_ADMIN_PASSWORD: "ChangeMe-First-Login-123"
       PDFDESK_OCR_LANGS: "eng"
+      PDFDESK_MAX_UPLOAD_MB: "0"  # no total upload limit; browser PDFs are sent in small chunks
       # Performance for big files (500-900 pages). Match these to the server's CPU cores / RAM.
       PDFDESK_WORKERS: "3"        # web worker processes
       PDFDESK_OCR_JOBS: "2"       # CPU cores used by one OCR run (each needs ~300-500 MB RAM on big scans)
