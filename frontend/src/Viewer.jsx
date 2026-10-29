@@ -89,7 +89,9 @@ export default function Viewer({ doc, mode, act, zoom, setZoom, hits = [], curHi
     <div className="viewer">
       <div className="pages" ref={box} onScroll={(e) => {
         const el = e.currentTarget;
-        const idx = pageAt(el.scrollTop + el.clientHeight / 3);
+        // The page box tracks the page at the viewport center. Search jumps center the hit,
+        // so this keeps the page box aligned with the page containing the highlighted result.
+        const idx = pageAt(el.scrollTop + el.clientHeight / 2);
         if (idx !== page) setPage(idx);
         // near either end of the window of a very large file: slide it, landing on the same page in the middle
         if (n > perWindow && Date.now() > edgeLock.current && pending.current == null) {
