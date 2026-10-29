@@ -70,8 +70,8 @@ nav.tools button:hover { background:var(--hover); } nav.tools button.active { ba
 .srow { display:flex; gap:6px; align-items:center; } .srow input { flex:1; min-width:0; }
 .srow.nav button { width:34px; font-size:13px; padding:4px 0; } .srow.nav .muted { font-size:13px; padding-left:4px; }
 .slist { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:4px; min-height:0; }
-.sr { padding:7px 9px; border-radius:7px; background:var(--hover); cursor:pointer; border:2px solid transparent; font-size:13px; }
-.sr:hover { border-color:#2f6df666; } .sr.cur { border-color:#e05a00; background:#ff7a0018; }
+.sr { width:100%; flex:none; padding:7px 9px; border-radius:7px; background:var(--hover); cursor:pointer; border:2px solid transparent; font-size:13px; text-align:left; }
+.sr:hover, .sr:focus-visible { border-color:#2f6df666; } .sr.cur { border-color:#e05a00; background:#ff7a0018; }
 .sr .snip { color:var(--muted); margin-top:2px; word-break:break-word; } .sr mark { background:#ffd600aa; color:inherit; border-radius:2px; padding:0 1px; }
 .pad { padding:6px; } .note.small { font-size:12px; padding:5px 8px; }
 .rpanel { width:210px; flex:none; background:var(--panel); border-left:1px solid var(--line); display:flex; flex-direction:column; }

@@ -198,8 +198,8 @@ function SearchPanel({ s, doc }) {
         <button className="primary" title="Search" onClick={() => s.doFind(s.q)} disabled={!s.q.trim() || s.searching}>Go</button>
       </div>
       <div className="srow nav">
-        <button title="Previous match (Shift+Enter)" disabled={s.hits.length < 2} onClick={() => s.stepHit(-1)}>▲</button>
-        <button title="Next match (Enter)" disabled={s.hits.length < 2} onClick={() => s.stepHit(1)}>▼</button>
+        <button aria-label="Previous match" title="Previous match (Shift+Enter)" disabled={s.hits.length < 2} onClick={() => s.stepHit(-1)}>↑</button>
+        <button aria-label="Next match" title="Next match (Enter)" disabled={s.hits.length < 2} onClick={() => s.stepHit(1)}>↓</button>
         <span className="muted grow">
           {s.searching ? "Searching…" : s.hits.length ? `${s.hitIdx + 1} of ${s.hits.length}${capped ? "+" : ""} · ${pages} page${pages > 1 ? "s" : ""}`
             : s.searched && fresh ? "No matches" : ""}
@@ -209,10 +209,11 @@ function SearchPanel({ s, doc }) {
       {capped && <div className="note warn small">Showing the first 2000 matches. Use a longer phrase to narrow it.</div>}
       <div className="slist" ref={list}>
         {s.hits.map((h, i) => (
-          <div key={h.gi} className={"sr" + (i === s.hitIdx ? " cur" : "")} onClick={() => s.showHit(i)} title="Jump to this match">
+          <button type="button" key={h.gi} className={"sr" + (i === s.hitIdx ? " cur" : "")} onClick={() => s.showHit(i)}
+            title={`Jump to match on page ${h.page + 1}`} aria-current={i === s.hitIdx ? "true" : undefined}>
             <div><b>Page {h.page + 1}</b> <span className="muted">· {where(h)}</span></div>
             <div className="snip">…<Marked text={h.snippet || ""} term={s.searched} />…</div>
-          </div>
+          </button>
         ))}
         {!s.hits.length && !s.searching && <p className="muted pad">Type a word or phrase and press Enter. Results are listed here — click one to jump to it.{" "}
           {doc.pages.length > 1 ? "Scanned pages need OCR before they can be searched." : ""}</p>}

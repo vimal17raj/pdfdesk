@@ -318,9 +318,18 @@ function Shell({ me, reloadMe, onLogout }) {
 
   const showHit = (i, list = hits) => {
     setHitIdx(i);
-    // pages far from the one on screen are empty boxes, so jump to the page first, then centre the match once it has drawn
-    if (list[i]) goPage(list[i].page);
-    setTimeout(() => document.getElementById("hit" + i)?.scrollIntoView({ behavior: "smooth", block: "center" }), 350);
+    // Pages outside the current window are created after the viewer handles this event.
+    // Wait for the match marker itself instead of guessing how long rendering will take.
+    const hit = list[i];
+    if (!hit) return;
+    goPage(hit.page);
+    let frames = 0;
+    const reveal = () => {
+      const target = document.getElementById("hit" + i);
+      if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
+      else if (frames++ < 120) requestAnimationFrame(reveal);
+    };
+    requestAnimationFrame(reveal);
   };
   const doFind = async (q) => {
     if (!q.trim()) return clearFind();
