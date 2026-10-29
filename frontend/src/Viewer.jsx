@@ -1,5 +1,7 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api.js";
+
+const GAP = 14, PAD = 16; // space between pages / above the first one (must match .pages in styles.css)
 
 const COLORS = { highlight: [1, 0.9, 0], underline: [0, 0.6, 0], strike: [1, 0, 0], rect: [1, 0, 0], ellipse: [0, 0.3, 1], ink: [1, 0, 0] };
 const DRAG_ANNOTS = ["highlight", "underline", "strike", "rect", "ellipse", "redact"];
@@ -17,11 +19,50 @@ export default function Viewer({ doc, mode, act, zoom, setZoom, hits = [], curHi
   const [fitMenu, setFitMenu] = useState(false);
   const box = useRef();
   const n = doc.pages.length;
+
+  // Browsers can't make a scroll area taller than ~33 million px, which a file with tens of thousands of pages
+  // exceeds. So only a window of pages [lo, lo+perWindow) exists in the page at a time; it slides as you scroll or jump.
+  const [lo, setLo] = useState(0);
+  const pending = useRef(null);     // page to scroll to once the window has been re-drawn
+  const edgeLock = useRef(0);       // don't slide again straight after sliding
+  const perWindow = useMemo(() => {
+    const avg = doc.pages.reduce((s, p) => s + p.h, 0) / Math.max(1, n);
+    return Math.max(200, Math.floor(25_000_000 / (avg * zoom + GAP)));
+  }, [doc.pages, zoom, n]);
+  const start = Math.max(0, Math.min(lo, Math.max(0, n - perWindow)));
+  const end = Math.min(n, start + perWindow);
+  const offsets = useMemo(() => {   // top of every page inside the window, so the page under the viewport is found without touching the DOM
+    const o = new Float64Array(end - start + 1);
+    let y = PAD;
+    for (let i = start; i < end; i++) { o[i - start] = y; y += doc.pages[i].h * zoom + GAP; }
+    o[end - start] = y;
+    return o;
+  }, [doc.pages, zoom, start, end]);
+  const pageAt = (y) => {           // binary search: last page whose top is above y
+    let a = 0, b = end - start - 1;
+    while (a < b) { const m = (a + b + 1) >> 1; if (offsets[m] <= y) a = m; else b = m - 1; }
+    return start + a;
+  };
+  const scrollToPage = (p, smooth) => {
+    const el = box.current;
+    if (el && p >= start && p < end) el.scrollTo({ top: offsets[p - start] - PAD, behavior: smooth ? "smooth" : "auto" });
+  };
   const go = (p) => {
     const t = Math.max(0, Math.min(n - 1, p));
     setPage(t);
-    document.getElementById("pg" + t)?.scrollIntoView({ behavior: "smooth" });
+    if (t >= start && t < end) return scrollToPage(t, true);
+    pending.current = t;            // outside the window: slide it so the target is in the middle, then scroll there
+    edgeLock.current = Date.now() + 800;
+    setLo(Math.max(0, Math.min(t - (perWindow >> 1), n - perWindow)));
   };
+  useLayoutEffect(() => {
+    if (pending.current != null) { scrollToPage(pending.current, false); pending.current = null; }
+  }, [start]);
+  useEffect(() => {                 // other parts of the app (search results, comments, fields…) ask to show a page
+    const h = (e) => go(e.detail);
+    window.addEventListener("pdfdesk-goto", h);
+    return () => window.removeEventListener("pdfdesk-goto", h);
+  });
   useEffect(() => { if (page >= n) setPage(Math.max(0, n - 1)); }, [n, page]);
   useEffect(() => { setPin(String(page + 1)); }, [page]);
   // Ctrl+F / the 🔍 button / Edit → Find open the Search panel on the right
@@ -47,19 +88,23 @@ export default function Viewer({ doc, mode, act, zoom, setZoom, hits = [], curHi
   return (
     <div className="viewer">
       <div className="pages" ref={box} onScroll={(e) => {
-        const el = e.currentTarget, kids = [...el.children];
-        const mid = el.scrollTop + el.clientHeight / 3;
-        const idx = kids.findIndex((k) => k.offsetTop - el.offsetTop + k.offsetHeight > mid);
-        if (idx >= 0 && idx !== page) setPage(idx);
+        const el = e.currentTarget;
+        const idx = pageAt(el.scrollTop + el.clientHeight / 3);
+        if (idx !== page) setPage(idx);
+        // near either end of the window of a very large file: slide it, landing on the same page in the middle
+        if (n > perWindow && Date.now() > edgeLock.current && pending.current == null) {
+          if (idx > end - 4 && end < n) { pending.current = idx; edgeLock.current = Date.now() + 800; setLo(idx - 10); }
+          else if (idx < start + 3 && start > 0) { pending.current = idx; edgeLock.current = Date.now() + 800; setLo(Math.max(0, idx - perWindow + 10)); }
+        }
       }}>
-        {doc.pages.map((pg, i) => Math.abs(i - page) > 3 ? (
+        {Array.from({ length: end - start }, (_, k) => start + k).map((i) => { const pg = doc.pages[i]; return Math.abs(i - page) > 3 ? (
           // far-away pages are empty boxes of the right size: a 900-page file costs almost nothing to scroll or re-render
           <div key={i} className="page ph" id={"pg" + i} style={{ width: pg.w * zoom, height: pg.h * zoom }} />
         ) : (
           <PageView key={i} doc={doc} i={i} pg={pg} zoom={zoom} mode={mode} act={act} near={true}
             hits={hits.filter((h) => h.page === i)} curHit={curHit} selectable={selectable} sel={sel} setSel={setSel} showLines={showLines} askText={askText}
             fillUI={fillUI} fieldBoxes={fieldBoxes} fieldObjs={fieldObjs} onPlace={onPlace} onRect={onRect} ghost={ghost} />
-        ))}
+        ); })}
       </div>
       {panel && <RailPanel kind={panel} doc={doc} page={page} go={go} close={() => setPanel(null)} search={ctx?.search} />}
       <div className="rail">
@@ -182,7 +227,7 @@ function RailPanel({ kind, doc, page, go, close, search }) {
     setItems(null);
     if (kind === "bookmarks") api.outline(doc.id).then(setItems).catch(() => setItems([]));
     if (kind === "comments") api.comments(doc.id).then(setItems).catch(() => setItems([]));
-  }, [kind, doc.id, doc.version]);
+  }, [kind, doc.id, doc.rev]);
   const title = { pages: "Pages", bookmarks: "Bookmarks", comments: "Comments", search: "Search" }[kind];
   return (
     <div className={"rpanel" + (kind === "search" ? " wide" : "")}>
@@ -191,7 +236,7 @@ function RailPanel({ kind, doc, page, go, close, search }) {
       {kind !== "search" && <div className="rpbody">
         {kind === "pages" && doc.pages.map((_, i) => (
           <div key={i} className={"rthumb" + (i === page ? " cur" : "")} onClick={() => go(i)}>
-            <img loading="lazy" src={api.imgUrl(doc.id, i, 0.25, doc.version)} alt="" /><span>{i + 1}</span>
+            <img loading="lazy" src={api.imgUrl(doc.id, i, 0.25, doc.rev)} alt="" /><span>{i + 1}</span>
           </div>
         ))}
         {kind === "bookmarks" && (items === null ? <p className="muted">Loading…</p> : items.length === 0
@@ -233,7 +278,7 @@ function PageView({ doc, i, pg, zoom, mode, act, near, hits, curHit, selectable,
     if (!near) return;
     if (showLines) api.lines(doc.id, i).then(setLines).catch(() => {}); else setLines([]);
     if (selectable) api.annots(doc.id, i).then(setAnnots).catch(() => {}); else setAnnots([]);
-  }, [doc.id, doc.version, i, near, showLines, selectable]);
+  }, [doc.id, doc.rev, i, near, showLines, selectable]);
 
   // everything the user can select on this page: annotations (+ form fields in the form tool)
   const objects = selectable ? [
@@ -363,7 +408,7 @@ function PageView({ doc, i, pg, zoom, mode, act, near, hits, curHit, selectable,
 
   return (
     <div className="page" id={"pg" + i} style={{ width: w, height: h }}>
-      {near ? <img src={api.imgUrl(doc.id, i, Math.min(3, zoom * 1.5).toFixed(2), doc.version)} width={w} height={h} alt="" draggable={false} /> : <div className="ph" />}
+      {near ? <img src={api.imgUrl(doc.id, i, Math.min(3, zoom * 1.5).toFixed(2), doc.rev)} width={w} height={h} alt="" draggable={false} /> : <div className="ph" />}
       <div ref={ref} className="overlay" style={{ cursor }} onMouseDown={down} onMouseMove={move} onMouseUp={up}
         onMouseLeave={() => { setMouse(null); up(); }}>
         {showLines && lines.map((l, k) => (

@@ -90,6 +90,162 @@ def test_big_document():
     assert c.get(f"/api/docs/{i}/download", headers=h).content[:5] == b"%PDF-"
 
 
+def _docdir(i):
+    return Path(os.environ["PDFDESK_DATA"]) / "docs" / i
+
+
+def test_streamed_upload_has_no_size_limit():
+    import app.config as cfg
+    h = auth()
+    data = make_pdf(3)
+    assert cfg.MAX_UPLOAD_MB == 0
+    r = c.post("/api/docs/raw?name=raw.pdf", headers=h, content=data)  # the file itself is the request body
+    assert r.status_code == 200 and r.json()["pages"] == 3 and r.json()["name"] == "raw.pdf"
+    # multipart still works, and a configured limit is enforced while streaming
+    assert c.post("/api/docs", headers=h, files={"file": ("m.pdf", data)}).status_code == 200
+    cfg.MAX_UPLOAD_MB = 0.0001
+    try:
+        assert c.post("/api/docs/raw?name=x.pdf", headers=h, content=data).status_code == 413
+    finally:
+        cfg.MAX_UPLOAD_MB = 0
+    assert not list((Path(os.environ["PDFDESK_DATA"]) / "tmp").glob("up_*.part"))  # no leftovers
+    assert c.post("/api/docs/raw?name=bad.pdf", headers=h, content=b"%PDF-1.4 not really").status_code == 400
+    # password-protected upload
+    d = pymupdf.open(); d.new_page()
+    enc = d.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="pw1", owner_pw="own")
+    assert c.post("/api/docs/raw?name=e.pdf", headers=h, content=enc).json()["detail"] == "PASSWORD_REQUIRED"
+    assert c.post("/api/docs/raw?name=e.pdf", headers={**h, "X-Pdf-Password": "wrong"}, content=enc).status_code == 400
+    assert c.post("/api/docs/raw?name=e.pdf", headers={**h, "X-Pdf-Password": "pw1"}, content=enc).status_code == 200
+
+
+def test_append_mode_edits_in_place_with_cheap_undo():
+    """Big files: one file, edits are appended to it, undo cuts them off again (no whole-file copies)."""
+    import app.config as cfg
+    h = auth()
+    cfg.HUGE_MB = 0  # treat every file as "big" for this test
+    try:
+        i = c.post("/api/docs/raw?name=huge.pdf", headers=h, content=make_pdf(40)).json()["id"]
+        d = _docdir(i)
+        assert (d / "work.pdf").exists() and not (d / "v1.pdf").exists()
+        size1 = (d / "work.pdf").stat().st_size
+        assert c.get(f"/api/docs/{i}", headers=h).json()["huge"] is True
+
+        r1 = c.post(f"/api/docs/{i}/annotate", headers=h, json={"page": 3, "type": "rect", "rect": [50, 50, 200, 120]}).json()
+        size2 = (d / "work.pdf").stat().st_size
+        assert r1["version"] == 2 and size1 < size2 < size1 + 6000  # appended, not rewritten
+        r2 = c.post(f"/api/docs/{i}/annotate", headers=h, json={"page": 3, "type": "text", "rect": [50, 200, 220, 220], "text": "hello"}).json()
+        size3 = (d / "work.pdf").stat().st_size
+        assert r2["version"] == 3 and size3 > size2
+        annots = lambda: [a["type"] for a in c.get(f"/api/docs/{i}/page/3/annots", headers=h).json()]
+        assert annots() == ["Square", "FreeText"]
+        assert len(list(d.glob("v*.pdf"))) == 0  # still just one file
+
+        # undo cuts the last change off the file; the page shows the earlier state at once
+        rev_before = r2["rev"]
+        u1 = c.post(f"/api/docs/{i}/undo", headers=h).json()
+        assert u1["version"] == 2 and (d / "work.pdf").stat().st_size == size2 and u1["rev"] != rev_before
+        assert annots() == ["Square"]
+        assert c.post(f"/api/docs/{i}/undo", headers=h).json()["version"] == 1
+        assert (d / "work.pdf").stat().st_size == size1 and annots() == []
+        assert c.post(f"/api/docs/{i}/undo", headers=h).status_code == 409
+        assert c.get(f"/api/docs/{i}/download", headers=h).content == (d / "work.pdf").read_bytes()
+        # redo puts the bytes back
+        assert c.post(f"/api/docs/{i}/redo", headers=h).json()["version"] == 2
+        assert c.post(f"/api/docs/{i}/redo", headers=h).json()["version"] == 3
+        assert (d / "work.pdf").stat().st_size == size3 and annots() == ["Square", "FreeText"]
+        assert c.post(f"/api/docs/{i}/redo", headers=h).status_code == 409
+
+        # undo, then a *different* edit: the old redo is gone, and the page must not show stale cached content
+        c.post(f"/api/docs/{i}/undo", headers=h)
+        r3 = c.post(f"/api/docs/{i}/annotate", headers=h, json={"page": 3, "type": "ellipse", "rect": [60, 300, 160, 360]}).json()
+        assert r3["version"] == 3 and r3["rev"] not in (rev_before, u1["rev"])
+        assert annots() == ["Square", "Circle"]
+        assert c.post(f"/api/docs/{i}/redo", headers=h).status_code == 409
+        assert not list(d.glob("tail_*.bin")) or all(f.name != "tail_3.bin" for f in d.glob("tail_*.bin"))
+
+        # deleting pages is an appendable change too, and can be undone
+        size_before = (d / "work.pdf").stat().st_size
+        r4 = c.post(f"/api/docs/{i}/pages", headers=h, json={"op": "delete", "pages": [0, 1]}).json()
+        assert r4["version"] == 4 and len(c.get(f"/api/docs/{i}", headers=h).json()["pages"]) == 38
+        assert (d / "work.pdf").stat().st_size < size_before + 20_000
+        assert c.get(f"/api/docs/{i}/search?q=Hello%20page%205", headers=h).json()
+        assert c.post(f"/api/docs/{i}/undo", headers=h).json()["version"] == 3
+        assert len(c.get(f"/api/docs/{i}", headers=h).json()["pages"]) == 40
+        assert c.post(f"/api/docs/{i}/redo", headers=h).json()["version"] == 4
+        assert len(c.get(f"/api/docs/{i}", headers=h).json()["pages"]) == 38
+    finally:
+        cfg.HUGE_MB = 500
+
+
+def test_append_mode_rebuilds_a_file_that_cannot_be_appended_to():
+    import app.config as cfg
+    h = auth()
+    cfg.HUGE_MB = 0
+    try:
+        broken = make_pdf(6).replace(b"startxref", b"startxxxx")  # damaged: MuPDF repairs it on open, so no appending
+        i = c.post("/api/docs/raw?name=broken.pdf", headers=h, content=broken).json()["id"]
+        r = c.post(f"/api/docs/{i}/annotate", headers=h, json={"page": 1, "type": "rect", "rect": [10, 10, 60, 60]})
+        assert r.status_code == 200 and r.json()["version"] == 1       # rebuilt: history starts over
+        assert [a["type"] for a in c.get(f"/api/docs/{i}/page/1/annots", headers=h).json()] == ["Square"]
+        r = c.post(f"/api/docs/{i}/annotate", headers=h, json={"page": 2, "type": "rect", "rect": [10, 10, 60, 60]})
+        assert r.json()["version"] == 2                                  # now clean, so edits append again
+        assert c.post(f"/api/docs/{i}/undo", headers=h).json()["version"] == 1
+    finally:
+        cfg.HUGE_MB = 500
+
+
+def test_bad_edit_leaves_big_file_untouched():
+    import app.config as cfg
+    h = auth()
+    cfg.HUGE_MB = 0
+    try:
+        i = c.post("/api/docs/raw?name=h.pdf", headers=h, content=make_pdf(5)).json()["id"]
+        f = _docdir(i) / "work.pdf"
+        before = f.read_bytes()
+        assert c.post(f"/api/docs/{i}/annotate", headers=h, json={"page": 99, "type": "rect", "rect": [1, 1, 5, 5]}).status_code == 404
+        assert c.post(f"/api/docs/{i}/fill", headers=h, json={"values": {"nope": "x"}}).status_code == 400
+        assert f.read_bytes() == before
+        assert c.get(f"/api/docs/{i}", headers=h).json()["version"] == 1
+    finally:
+        cfg.HUGE_MB = 500
+
+
+def test_desktop_opens_big_file_where_it_is(tmp_path):
+    """Desktop app: a big PDF chosen in the Open dialog is used in place; the original is never modified."""
+    import app.config as cfg
+    from app import native
+    src = tmp_path / "My Archive.pdf"
+    src.write_bytes(make_pdf(30))
+    original = src.read_bytes()
+    cfg.DESKTOP, cfg.HUGE_MB = True, 0
+    native.pick_pdf = lambda: str(src)
+    try:
+        r = c.post("/api/desktop/open", json={}).json()   # no Authorization header: desktop mode
+        i = r["id"]
+        assert r["pages"] == 30 and r["name"] == "My Archive.pdf" and r["linked"] is True
+        assert not (_docdir(i) / "work.pdf").exists()      # nothing copied yet
+        assert c.get(f"/api/docs/{i}/page/10.png?zoom=1").status_code == 200
+        assert c.get(f"/api/docs/{i}/search?q=Hello%20page%2029").json()
+        # the first edit makes a private working copy; the user's file stays byte-for-byte the same
+        e = c.post(f"/api/docs/{i}/annotate", json={"page": 1, "type": "rect", "rect": [20, 20, 80, 80]}).json()
+        assert e["version"] == 2 and e["linked"] is False and (_docdir(i) / "work.pdf").exists()
+        assert src.read_bytes() == original
+        assert c.post(f"/api/docs/{i}/undo").json()["version"] == 1
+        assert src.read_bytes() == original
+        # only paths the user picked can be opened by path
+        assert c.post("/api/desktop/open", json={"path": str(tmp_path / "other.pdf")}).status_code == 403
+        # a password-protected big file asks for the password, then opens a normal copy
+        d = pymupdf.open(); d.new_page()
+        enc = tmp_path / "enc.pdf"; enc.write_bytes(d.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="pw1", owner_pw="own"))
+        native.pick_pdf = lambda: str(enc)
+        q = c.post("/api/desktop/open", json={}).json()
+        assert q["password_required"] is True
+        assert c.post("/api/desktop/open", json={"path": q["path"], "password": "pw1"}).json()["pages"] == 1
+    finally:
+        cfg.DESKTOP, cfg.HUGE_MB = False, 500
+    assert c.post("/api/desktop/open", json={}).status_code == 401  # not available outside the desktop app
+
+
 def test_job_cancel_and_stale():
     import time
     from app import jobs, pdfops

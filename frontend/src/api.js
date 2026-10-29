@@ -42,7 +42,38 @@ const files = (key, list, extra = {}) => {
 export const api = {
   login: (username, password) => post("/api/auth/login", { username, password }),
   me: () => req("/api/me"),
-  upload: (file, password = "") => post("/api/docs", files("file", [file], { password })),
+  // Send bounded chunks so uploads also work behind hosts/proxies that cap an individual request body.
+  // The browser reads only one slice at a time; the server appends each slice directly to disk.
+  upload: (file, password = "", onProgress, ctl = {}) =>
+    (async () => {
+      const chunkSize = 16 * 1024 * 1024;
+      const idBytes = crypto.getRandomValues(new Uint8Array(16));
+      const uploadId = Array.from(idBytes, (b) => b.toString(16).padStart(2, "0")).join("");
+      for (let offset = 0; offset < file.size || (file.size === 0 && offset === 0);) {
+        const end = Math.min(file.size, offset + chunkSize);
+        const final = end === file.size;
+        const result = await new Promise((resolve, reject) => {
+          const x = new XMLHttpRequest();
+          x.open("POST", `/api/docs/chunk?upload_id=${uploadId}&name=${encodeURIComponent(file.name)}&offset=${offset}&total=${file.size}&final=${final}`);
+          if (token) x.setRequestHeader("Authorization", `Bearer ${token}`);
+          if (final && password) x.setRequestHeader("X-Pdf-Password", encodeURIComponent(password));
+          x.upload.onprogress = (e) => e.lengthComputable && onProgress?.(offset + e.loaded, file.size);
+          x.onload = () => {
+            let body = {};
+            try { body = JSON.parse(x.responseText); } catch {}
+            if (x.status === 401 && token) { setToken(""); location.reload(); }
+            x.status >= 200 && x.status < 300 ? resolve(body) : reject(new Error(typeof body.detail === "string" ? body.detail : x.statusText || "Upload failed"));
+          };
+          x.onerror = () => reject(new Error("Upload failed — connection lost"));
+          x.onabort = () => reject(new Error("Upload cancelled"));
+          ctl.abort = () => x.abort();
+          x.send(file.slice(offset, end));
+        });
+        offset = end;
+        if (final) return result;
+      }
+    })(),
+  desktopOpen: (path, password = "") => post("/api/desktop/open", { path: path ?? null, password }),
   doc: (id) => req(`/api/docs/${id}`),
   recent: () => req("/api/docs"),
   share: (id, user) => post(`/api/docs/${id}/share`, { user }),

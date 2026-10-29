@@ -26,7 +26,10 @@ ADMIN_PASSWORD = os.getenv("PDFDESK_ADMIN_PASSWORD", "admin123")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 LLM_MODEL = os.getenv("PDFDESK_LLM_MODEL", "claude-sonnet-5-5")
 
-MAX_UPLOAD_MB =int(os.getenv("PDFDESK_MAX_UPLOAD_MB", "200"))
+# 0 = no limit (uploads are streamed straight to disk, never held in memory)
+MAX_UPLOAD_MB = int(os.getenv("PDFDESK_MAX_UPLOAD_MB", "0"))
+# Files bigger than this are edited in place by appending (no whole-file copy per edit) and undone by truncating
+HUGE_MB = int(os.getenv("PDFDESK_HUGE_MB", "500"))
 OCR_LANGS = os.getenv("PDFDESK_OCR_LANGS", "eng")
 # CPU cores used by one OCR run (each core also needs ~300-500 MB of RAM on big scans)
 OCR_JOBS = int(os.getenv("PDFDESK_OCR_JOBS", str(max(1, min(os.cpu_count() or 1, 3)))))

@@ -1,11 +1,16 @@
+import os
+import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
+import pymupdf
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from . import audit, auth, config, jobs, pdfops, store, users
 
@@ -15,10 +20,61 @@ U = Depends(auth.current_user)
 
 
 async def _read(f: UploadFile) -> bytes:
+    """Small files only (images, merge inputs). PDFs of any size go through _ingest, which never holds them in memory."""
     data = await f.read()
-    if len(data) > config.MAX_UPLOAD_MB * 1024 * 1024:
+    if config.MAX_UPLOAD_MB and len(data) > config.MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(413, f"File larger than {config.MAX_UPLOAD_MB} MB")
     return data
+
+
+def _rm_quiet(f: Path):
+    """Delete a temp file; Windows may still have it locked for an instant after a failed open — never let that
+    hide the real error. Anything left behind is swept at the next start."""
+    import gc
+    for _ in range(2):
+        try:
+            f.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            gc.collect()
+            time.sleep(0.2)
+
+
+def _sweep_tmp():
+    cutoff = time.time() - 24 * 3600
+    for f in config.TMP_DIR.glob("*"):
+        try:
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
+        except OSError:
+            pass
+
+
+_sweep_tmp()
+
+
+def _check_limit(size: int):
+    if config.MAX_UPLOAD_MB and size > config.MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(413, f"File larger than {config.MAX_UPLOAD_MB} MB")
+
+
+def _ingest(user: dict, tmp: Path, name: str, password: str = "") -> dict:
+    """A finished upload sitting on disk -> a document. Memory use stays small however big the file is."""
+    try:
+        with open(tmp, "rb") as f:
+            head = f.read(1024)
+        if head.lstrip()[:5] != b"%PDF-":  # a picture / scan: becomes a one-page PDF (pictures are never huge)
+            if tmp.stat().st_size > 300 * 1024 * 1024:
+                raise HTTPException(400, "That file is not a PDF")
+            data = pdfops.images_to_pdf([tmp.read_bytes()])
+            tmp.write_bytes(data)
+        pages = pdfops.unlock_file(tmp, password)
+        size = tmp.stat().st_size
+        doc_id = store.create_from_file(user["user"], name or "document.pdf", tmp)
+    finally:
+        _rm_quiet(tmp)
+    audit.log(user["user"], "upload", doc_id, f"{name} ({pages}p, {size // 1024} KB)", user["ip"])
+    return {**store.info(doc_id), "pages": pages, "size": size}
 
 
 def _doc(doc_id: str, user: dict) -> tuple[Path, dict]:
@@ -148,15 +204,126 @@ def delete_user(name: str, u: dict = Depends(auth.admin_only)):
 
 
 # ---------- documents ----------
+async def _receive(chunks, name: str, password: str, u: dict) -> dict:
+    """Write an incoming upload to disk piece by piece (any size), then turn it into a document."""
+    tmp = config.TMP_DIR / f"up_{uuid.uuid4().hex}.part"
+    size = 0
+    try:
+        with open(tmp, "wb") as out:
+            async for chunk in chunks:
+                size += len(chunk)
+                _check_limit(size)
+                out.write(chunk)
+        return await run_in_threadpool(_ingest, u, tmp, Path(name).name or "document.pdf", password)
+    finally:
+        _rm_quiet(tmp)
+
+
+async def _file_chunks(f: UploadFile):
+    while chunk := await f.read(8 * 1024 * 1024):
+        yield chunk
+
+
 @app.post("/api/docs")
 async def upload(file: UploadFile = File(...), password: str = Form(""), u: dict = U):
-    data = await _read(file)
-    if data.lstrip()[:5] != b"%PDF-":
-        data = pdfops.images_to_pdf([data])
+    return await _receive(_file_chunks(file), file.filename or "document.pdf", password, u)
+
+
+@app.post("/api/docs/raw")
+async def upload_raw(request: Request, name: str = "document.pdf", u: dict = U):
+    """Browser upload of the file itself as the request body: no form encoding, one write to disk, any size.
+    A PDF password travels in a header (URLs end up in logs)."""
+    from urllib.parse import unquote
+    password = unquote(request.headers.get("x-pdf-password", ""))
+    return await _receive(request.stream(), name, password, u)
+
+
+@app.post("/api/docs/chunk")
+async def upload_chunk(request: Request, upload_id: str, name: str = "document.pdf", offset: int = 0,
+                       total: int = 0, final: bool = False, u: dict = U):
+    """Append one bounded browser upload chunk to disk; finalize through the usual streaming ingest path."""
+    if len(upload_id) != 32 or any(c not in "0123456789abcdef" for c in upload_id.lower()):
+        raise HTTPException(400, "Invalid upload id")
+    if total < 0 or offset < 0 or offset > total or (not final and offset >= total):
+        raise HTTPException(400, "Invalid upload range")
+    _check_limit(total)
+    tmp = config.TMP_DIR / f"chunk_{upload_id.lower()}.part"
+    if offset == 0:
+        if tmp.exists():
+            raise HTTPException(409, "Upload id already exists")
+        mode = "xb"
     else:
-        data = pdfops.unlock(data, password)
-    return _new_doc(u, file.filename or "document.pdf", data, "upload",
-                    f"{file.filename} ({pdfops.validate(data)}p, {len(data)//1024} KB)")
+        if not tmp.is_file() or tmp.stat().st_size != offset:
+            raise HTTPException(409, "Upload chunk is out of sequence")
+        mode = "ab"
+    received = 0
+    try:
+        with open(tmp, mode) as out:
+            async for chunk in request.stream():
+                received += len(chunk)
+                if offset + received > total:
+                    raise HTTPException(400, "Upload chunk exceeds declared file size")
+                out.write(chunk)
+        size = offset + received
+        if size != total and final:
+            raise HTTPException(400, "Upload ended before the declared file size")
+        if size == total and not final:
+            raise HTTPException(400, "Final upload chunk was not marked complete")
+        if final:
+            from urllib.parse import unquote
+            password = unquote(request.headers.get("x-pdf-password", ""))
+            return await run_in_threadpool(_ingest, u, tmp, Path(name).name or "document.pdf", password)
+        return {"received": size, "total": total}
+    except Exception:
+        _rm_quiet(tmp)
+        raise
+
+
+# ---------- desktop app: open a file from this PC without copying it ----------
+_picked: set[str] = set()  # paths the user chose in the native dialog this session
+
+
+class OpenLocal(BaseModel):
+    path: str | None = None
+    password: str = ""
+
+
+@app.post("/api/desktop/open")
+def desktop_open(b: OpenLocal, u: dict = U):
+    if not config.DESKTOP:
+        raise HTTPException(404, "Only available in the Windows desktop app")
+    if b.path is None:
+        from . import native
+        picked = native.pick_pdf()
+        if not picked:
+            return {"cancelled": True}
+        _picked.add(os.path.normcase(picked))
+        b.path = picked
+    elif os.path.normcase(b.path) not in _picked:
+        raise HTTPException(403, "Choose the file with the Open dialog")
+    p = Path(b.path)
+    if not p.is_file():
+        raise HTTPException(404, "File not found")
+    size = p.stat().st_size
+    with open(p, "rb") as f:
+        is_pdf = f.read(1024).lstrip()[:5] == b"%PDF-"
+    encrypted = False
+    if is_pdf:
+        try:
+            d = pymupdf.open(str(p), filetype="pdf")
+            encrypted, pages = d.needs_pass, d.page_count
+            d.close()
+        except Exception:
+            raise HTTPException(400, "Not a valid PDF file")
+    if is_pdf and not encrypted and size > config.HUGE_MB * 1024 * 1024:
+        doc_id = store.create_linked(u["user"], p.name, p)  # big file: use it where it is
+        audit.log(u["user"], "open_local", doc_id, f"{p.name} ({pages}p, {size // 1024} KB, in place)", u["ip"])
+        return {**store.info(doc_id), "pages": pages, "size": size}
+    if encrypted and not b.password:
+        return {"password_required": True, "path": b.path, "name": p.name}
+    tmp = config.TMP_DIR / f"up_{uuid.uuid4().hex}.part"
+    shutil.copyfile(p, tmp)
+    return _ingest(u, tmp, p.name, b.password)
 
 
 @app.get("/api/docs")
@@ -242,8 +409,16 @@ def search(doc_id: str, q: str, u: dict = U):
     store.check_access(doc_id, u)
     if not q.strip():
         return []
-    with store.reading(doc_id) as doc:
-        return pdfops.search_text(doc, q)
+    # searched in slices, letting go of the document between slices, so a search through a huge file
+    # doesn't stop the pages (or anything else) from loading in the meantime
+    hits, step = [], 60
+    n = store.page_count(doc_id)
+    for start in range(0, n, step):
+        with store.reading(doc_id) as doc:
+            hits += pdfops.search_text(doc, q, start, start + step)
+        if len(hits) >= pdfops.SEARCH_LIMIT:
+            return hits[: pdfops.SEARCH_LIMIT]
+    return hits
 
 
 @app.post("/api/docs/{doc_id}/undo")
@@ -382,7 +557,7 @@ class Split(BaseModel):
 @app.post("/api/docs/{doc_id}/split")
 def split(doc_id: str, b: Split, u: dict = U):
     path, info = _doc(doc_id, u)
-    groups = pdfops.parse_ranges(b.ranges, len(store.page_sizes(doc_id)))
+    groups = pdfops.parse_ranges(b.ranges, store.page_count(doc_id))
     zipped = pdfops.split(path, groups, _stem(info["name"]))
     audit.log(u["user"], "split", doc_id, b.ranges, u["ip"])
     return _file(zipped, f"{_stem(info['name'])}_split.zip", "application/zip")
@@ -430,7 +605,7 @@ def run_ocr(doc_id: str, b: Ocr, u: dict = U):
     """Starts OCR in the background and returns a job; poll /api/jobs/{id}."""
     path, info = _doc(doc_id, u)
     langs, pages = pdfops.check_ocr_args(b.langs, b.pages)
-    base = info["version"]
+    base = info["rev"]
 
     def worker(job, cancelled):
         tmp = config.TMP_DIR / f"{job['id']}.pdf"
@@ -455,7 +630,7 @@ class Compress(BaseModel):
 def compress(doc_id: str, b: Compress, u: dict = U):
     path, info = _doc(doc_id, u)
     pdfops.check_level(b.level)
-    base = info["version"]
+    base = info["rev"]
 
     def worker(job, cancelled):
         tmp = config.TMP_DIR / f"{job['id']}.pdf"

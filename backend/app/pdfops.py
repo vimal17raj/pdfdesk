@@ -30,7 +30,7 @@ def _open(data) -> fitz.Document:
     if isinstance(data, fitz.Document):
         return data
     try:
-        doc = fitz.open(str(data)) if isinstance(data, (str, Path)) else fitz.open(stream=data, filetype="pdf")
+        doc = fitz.open(str(data), filetype="pdf") if isinstance(data, (str, Path)) else fitz.open(stream=data, filetype="pdf")
     except Exception:
         raise HTTPException(400, "Not a valid PDF file")
     if doc.needs_pass:
@@ -87,6 +87,31 @@ def unlock(data: bytes, password: str | None) -> bytes:
     out = doc.tobytes(encryption=fitz.PDF_ENCRYPT_NONE, garbage=3, deflate=True)
     doc.close()
     return out
+
+
+def unlock_file(path: Path, password: str | None) -> int:
+    """For an uploaded file on disk: check it opens, decrypt it in place if it needs (and is given) a password.
+    Returns the page count. Works on any size: nothing is loaded into memory."""
+    try:
+        doc = fitz.open(str(path), filetype="pdf")  # the upload's temp name has no .pdf ending
+    except Exception:
+        raise HTTPException(400, "Not a valid PDF file")
+    try:
+        if doc.needs_pass:
+            if not password:
+                raise HTTPException(400, "PASSWORD_REQUIRED")
+            if not doc.authenticate(password):
+                raise HTTPException(400, "Wrong password")
+            tmp = path.with_suffix(".dec")
+            doc.save(str(tmp), encryption=fitz.PDF_ENCRYPT_NONE, garbage=0, deflate=True)
+            n = doc.page_count
+            doc.close()
+            os.replace(tmp, path)
+            return n
+        return doc.page_count
+    finally:
+        if not doc.is_closed:
+            doc.close()
 
 
 def validate(data: bytes) -> int:
@@ -443,11 +468,12 @@ def outline(data: bytes) -> list[dict]:
 SEARCH_LIMIT = 2000
 
 
-def search_text(data, query: str) -> list[dict]:
-    """Stops at SEARCH_LIMIT matches so a common word in a 900-page file doesn't flood the browser."""
+def search_text(data, query: str, start: int = 0, stop: int | None = None) -> list[dict]:
+    """Stops at SEARCH_LIMIT matches so a common word in a 900-page file doesn't flood the browser.
+    start/stop let the caller search a huge file in slices, so other requests aren't blocked meanwhile."""
     doc = _open(data)
     hits = []
-    for i in range(doc.page_count):
+    for i in range(start, doc.page_count if stop is None else min(stop, doc.page_count)):
         pg = doc[i]
         found = pg.search_for(query)
         words, lines = [], {}

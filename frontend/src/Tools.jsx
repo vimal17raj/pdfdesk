@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { api, download } from "./api.js";
 import Viewer from "./Viewer.jsx";
+import { goPage } from "./nav.js";
 
 export const TOOLS = [
   { id: "view", label: "View & search", icon: "👁", needsDoc: true },
@@ -20,7 +21,7 @@ export const TOOLS = [
   { id: "compare", label: "Compare files", icon: "⇄" },
 ];
 
-const kb = (b) => (b > 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB");
+const kb = (b) => (b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GB" : b > 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB");
 const today = () => new Date().toISOString().slice(0, 10);
 const swap = (a, i, j) => { const c = [...a]; [c[i], c[j]] = [c[j], c[i]]; return c; };
 
@@ -80,7 +81,7 @@ function Workspace({ tool, ctx }) {
       setFields(f);
       setValues(Object.fromEntries(f.map((x) => [x.name, x.value])));
     }).catch(() => {});
-  }, [id, doc.id, doc.version]);
+  }, [id, doc.id, doc.rev]);
 
   const saveSig = (k, v) => { (k === "sig" ? setSig : setIni)(v); try { localStorage.setItem(k === "sig" ? "pdfdesk_sig" : "pdfdesk_ini", JSON.stringify(v)); } catch {} };
 
@@ -468,7 +469,7 @@ function FormPanel({ cfg, setCfg, fields, ctx, formMode, setFormMode, act, doc }
       <ul className="list">
         {fields.map((f) => (
           <li key={f.name}>
-            <a onClick={() => document.getElementById("pg" + f.page)?.scrollIntoView({ behavior: "smooth" })}>{f.name}</a>
+            <a onClick={() => goPage(f.page)}>{f.name}</a>
             <span className="muted">{f.type} · p{f.page + 1}</span>
             <span className="rowbtns">
               <button title="Rename" onClick={() => rename(f)}>✎</button>
@@ -484,7 +485,7 @@ function FormPanel({ cfg, setCfg, fields, ctx, formMode, setFormMode, act, doc }
 
 function CommentPanel({ doc, ctool, setCtool, ctx }) {
   const [list, setList] = useState([]);
-  useEffect(() => { api.comments(doc.id).then(setList).catch(() => {}); }, [doc.id, doc.version]);
+  useEffect(() => { api.comments(doc.id).then(setList).catch(() => {}); }, [doc.id, doc.rev]);
   return (
     <div className="stack">
       <div className="chips">
@@ -496,7 +497,7 @@ function CommentPanel({ doc, ctool, setCtool, ctx }) {
         {list.length === 0 && <li className="muted">No comments yet.</li>}
         {list.map((c) => (
           <li key={c.xref}>
-            <a onClick={() => document.getElementById("pg" + c.page)?.scrollIntoView({ behavior: "smooth" })}>Page {c.page + 1} · {c.type}</a>
+            <a onClick={() => goPage(c.page)}>Page {c.page + 1} · {c.type}</a>
             <span>{c.text || <i className="muted">(no text)</i>}</span>
             <span className="muted">{c.author}</span>
             <button onClick={() => ctx.act("Deleting…", () => api.deleteAnnot(doc.id, { page: c.page, xref: c.xref }))}>✕</button>
@@ -572,7 +573,7 @@ function Organize({ ctx }) {
               setSel([i]);
               act("Reordering…", () => api.pages(doc.id, { op: "reorder", order }));
             }}>
-            <img loading="lazy" src={api.imgUrl(doc.id, i, 0.5, doc.version)} alt="" draggable={false} />
+            <img loading="lazy" src={api.imgUrl(doc.id, i, 0.5, doc.rev)} alt="" draggable={false} />
             <span>{i + 1}</span>
           </div>
         ))}

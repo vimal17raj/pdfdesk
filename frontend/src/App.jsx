@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api, download, fetchBlob, getToken, setToken } from "./api.js";
 import { TOOLS, ToolView, Audit, Users } from "./Tools.jsx";
+import { goPage } from "./nav.js";
 
 export default function App() {
   const [me, setMe] = useState(null);
@@ -44,7 +45,7 @@ function Login({ onLogin }) {
   );
 }
 
-const kb = (b) => (b > 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB");
+const kb = (b) => (b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GB" : b > 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB");
 const ago = (t) => new Date(t * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 const blobToDataUrl = (blob) => new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
 const imgSize = (url) => new Promise((res) => { const i = new Image(); i.onload = () => res([i.naturalWidth, i.naturalHeight]); i.src = url; });
@@ -62,6 +63,7 @@ function Shell({ me, reloadMe, onLogout }) {
   const [tool, setTool] = useState("view");
   const [zoom, setZoom] = useState(1.2);
   const [busy, setBusy] = useState("");
+  const [up, setUp] = useState(null); // upload in progress: {name, loaded, total, ctl}
   const [toast, setToast] = useState(null);
   const [dialog, setDialog] = useState(null); // recent | share | props
   const [recent, setRecent] = useState([]);
@@ -110,29 +112,59 @@ function Shell({ me, reloadMe, onLogout }) {
   };
 
   const refreshRecent = () => api.recent().then(setRecent).catch(() => {});
-  useEffect(() => { refreshRecent(); }, [doc?.id, doc?.version]);
+  useEffect(() => { refreshRecent(); }, [doc?.id, doc?.rev]);
   useEffect(() => {
     const m = location.hash.match(/doc=([a-z0-9]+)/);
     if (m) run("Opening…", () => openDoc(m[1]));
   }, []);
 
   // ---------- File menu actions ----------
-  const openFile = (file, h = null) =>
-    run("Opening…", async () => {
+  // Files of any size: the browser streams the file from disk straight to the server (with a progress bar)
+  const openFile = async (file, h = null) => {
+    const ctl = {};
+    const send = async (pw) => {
+      setUp({ name: file.name, loaded: 0, total: file.size, ctl });
+      try {
+        return await api.upload(file, pw, (loaded, total) => setUp((s) => s && { ...s, loaded, total }), ctl);
+      } finally {
+        setUp(null);
+      }
+    };
+    try {
       let info;
       try {
-        info = await api.upload(file);
+        info = await send("");
       } catch (e) {
         if (e.message !== "PASSWORD_REQUIRED") throw e;
         const pw = prompt(`"${file.name}" is password protected. Enter the password:`);
         if (pw === null) return;
-        info = await api.upload(file, pw);
+        info = await send(pw);
       }
+      setBusy("Opening…");
       await openDoc(info.id);
       handle.current = h;
+    } catch (e) {
+      if (e.message !== "Upload cancelled") say(e.message, true);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  // Windows desktop app: the standard Open dialog; big files are used where they are, nothing is copied
+  const openLocal = () =>
+    run("Opening…", async () => {
+      let r = await api.desktopOpen(null);
+      if (r.cancelled) return;
+      if (r.password_required) {
+        const pw = prompt(`"${r.name}" is password protected. Enter the password:`);
+        if (pw === null) return;
+        r = await api.desktopOpen(r.path, pw);
+      }
+      await openDoc(r.id);
     });
 
   const openPicker = async () => {
+    if (me.desktop) return openLocal();
     if (window.showOpenFilePicker) {
       try {
         const [h] = await window.showOpenFilePicker({ types: [{ description: "PDF or image", accept: { "application/pdf": [".pdf"], "image/*": [".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"] } }] });
@@ -143,19 +175,31 @@ function Shell({ me, reloadMe, onLogout }) {
   };
 
   const currentBlob = () => fetchBlob(`/api/docs/${doc.id}/download`);
+  const BIG = 300 * 1024 * 1024; // above this, never build the whole file in browser memory
+
+  // streams the document from the server straight into a file on disk (works for any size)
+  const streamTo = async (writable) => {
+    const r = await fetch(`/api/docs/${doc.id}/download`, { headers: { Authorization: `Bearer ${getToken()}` } });
+    if (!r.ok) throw new Error("Download failed");
+    await r.body.pipeTo(writable);
+  };
 
   const saveAs = () =>
     run("Saving…", async () => {
-      const blob = await currentBlob();
       if (window.showSaveFilePicker) {
         try {
           const h = await window.showSaveFilePicker({ suggestedName: doc.name.replace(/\.[^.]+$/, "") + ".pdf", types: [{ description: "PDF", accept: { "application/pdf": [".pdf"] } }] });
-          const w = await h.createWritable();
-          await w.write(blob);
-          await w.close();
+          await streamTo(await h.createWritable());
           handle.current = h;
           return say("Saved " + h.name);
         } catch (e) { if (e.name === "AbortError") return; throw e; }
+      }
+      if (doc.size > BIG) { // plain link: the browser saves it to disk itself, piece by piece
+        const a = document.createElement("a");
+        a.href = `/api/docs/${doc.id}/download?token=${getToken()}`;
+        a.download = doc.name;
+        a.click();
+        return say("Download started — see your browser's downloads");
       }
       await download(`/api/docs/${doc.id}/download`, "GET", null, doc.name);
     });
@@ -163,15 +207,14 @@ function Shell({ me, reloadMe, onLogout }) {
   const save = () => {
     if (!handle.current) return saveAs();
     return run("Saving…", async () => {
-      const w = await handle.current.createWritable();
-      await w.write(await currentBlob());
-      await w.close();
+      await streamTo(await handle.current.createWritable());
       say("Saved to " + handle.current.name);
     });
   };
 
   const print = () =>
     run("Preparing to print…", async () => {
+      if (doc.size > BIG) return say("This file is too large to print in one go. Use Organize pages → Extract to make a smaller PDF of the pages you need, then print that.", true);
       const url = URL.createObjectURL(await currentBlob());
       const f = document.createElement("iframe");
       f.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0";
@@ -205,7 +248,7 @@ function Shell({ me, reloadMe, onLogout }) {
     });
   const snapshot = () =>
     run("Copying page image…", async () => {
-      const img = await (await fetch(api.imgUrl(doc.id, curPage(), 2, doc.version))).blob();
+      const img = await (await fetch(api.imgUrl(doc.id, curPage(), 2, doc.rev))).blob();
       await navigator.clipboard.write([new ClipboardItem({ "image/png": img })]);
       say("Page image copied — paste it into Word, Teams, e-mail…");
     });
@@ -276,7 +319,7 @@ function Shell({ me, reloadMe, onLogout }) {
   const showHit = (i, list = hits) => {
     setHitIdx(i);
     // pages far from the one on screen are empty boxes, so jump to the page first, then centre the match once it has drawn
-    document.getElementById("pg" + list[i]?.page)?.scrollIntoView({ block: "start" });
+    if (list[i]) goPage(list[i].page);
     setTimeout(() => document.getElementById("hit" + i)?.scrollIntoView({ behavior: "smooth", block: "center" }), 350);
   };
   const doFind = async (q) => {
@@ -412,7 +455,17 @@ function Shell({ me, reloadMe, onLogout }) {
           </tbody></table>
         </Modal>
       )}
-      {busy && <div className="busy"><div className="spin" />{busy}</div>}
+      {up && (
+        <div className="busy">
+          <div className="uploadbox">
+            <b>{up.loaded >= up.total ? "Checking the file…" : "Uploading"} {up.name}</b>
+            <div className="bar"><div style={{ width: (up.total ? (up.loaded / up.total) * 100 : 0) + "%" }} /></div>
+            <span>{kb(up.loaded)} of {kb(up.total)} · {up.total ? Math.round((up.loaded / up.total) * 100) : 0}%</span>
+            <button onClick={() => up.ctl.abort?.()}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {busy && !up && <div className="busy"><div className="spin" />{busy}</div>}
       {toast && <div className={"toast" + (toast.bad ? " bad" : "")}>{toast.msg}</div>}
     </div>
   );
