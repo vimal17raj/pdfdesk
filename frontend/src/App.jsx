@@ -400,6 +400,7 @@ function Shell({ me, reloadMe, onLogout }) {
     ],
     Convert: [
       { label: "PDF → Word (.docx)", on: () => dl(`/api/docs/${doc.id}/export?fmt=docx`, stem + ".docx"), off: !has },
+      { label: "PDF → Excel (.xlsx)", on: () => dl(`/api/docs/${doc.id}/export?fmt=xlsx`, stem + ".xlsx"), off: !has },
       { label: "PDF → Text (.txt)", on: () => dl(`/api/docs/${doc.id}/export?fmt=txt`, stem + ".txt"), off: !has },
       { label: "PDF → Web page (.html)", on: () => dl(`/api/docs/${doc.id}/export?fmt=html`, stem + ".html"), off: !has },
       { label: "PDF → Images (PNG, zip)", on: () => dl(`/api/docs/${doc.id}/export?fmt=png&dpi=150`, stem + "_png.zip"), off: !has },

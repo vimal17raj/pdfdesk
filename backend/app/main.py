@@ -446,6 +446,9 @@ def export(doc_id: str, fmt: str = "txt", dpi: int = 150, u: dict = U):
     if fmt == "docx":
         return _file(pdfops.export_docx(data), f"{stem}.docx",
                      "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    if fmt == "xlsx":
+        return _file(pdfops.export_xlsx(data), f"{stem}.xlsx",
+                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     if fmt in ("png", "jpg"):
         return _file(pdfops.export_images(data, fmt, dpi, stem), f"{stem}_{fmt}.zip", "application/zip")
     raise HTTPException(400, "Unknown export format")

@@ -12,6 +12,8 @@ from collections import Counter
 from contextvars import ContextVar
 from datetime import date
 from pathlib import Path
+from typing import Any
+from xml.sax.saxutils import escape
 
 import pymupdf as fitz
 from fastapi import HTTPException
@@ -364,12 +366,18 @@ def split(data: bytes, groups: list[list[int]], stem: str) -> bytes:
 
 
 # ---------------------------------------------------------------- compress / OCR
-_LEVELS = {"low": (200, 150, 85), "medium": (150, 110, 70), "high": (120, 80, 50)}
+_LEVELS = {
+    "low": (200, 150, 85),
+    "medium": (150, 110, 70),
+    "high": (120, 80, 50),
+    # A lower threshold deliberately catches images already reduced by High (80 dpi).
+    "maximum": (70, 48, 30),
+}
 
 
 def check_level(level: str):
     if level not in _LEVELS:
-        raise HTTPException(400, "level must be low, medium or high")
+        raise HTTPException(400, "level must be low, medium, high or maximum")
 
 
 def compress_file(src, dst, level: str) -> None:
@@ -547,6 +555,79 @@ def export_docx(data: bytes) -> bytes:
     buf = io.BytesIO()
     out.save(buf)
     return buf.getvalue()
+
+
+def export_xlsx(data: bytes) -> bytes:
+    """Export extracted PDF text as Excel rows without requiring an external spreadsheet package."""
+    doc = _open(data)
+    rows = [["Page", "Block", "Y position (pt)", "Text"]]
+    for page_no, page in enumerate(doc, 1):
+        for block_no, block in enumerate(page.get_text("blocks", sort=True), 1):
+            text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", str(block[4])).strip()
+            if text:
+                rows.append([page_no, block_no, round(float(block[1]), 1), text])
+    doc.close()
+
+    # Excel allows 1,048,576 rows per sheet. Repeat the header if a document needs more than one sheet.
+    max_data_rows = 1_000_000
+    chunks = [rows[1 + i:1 + i + max_data_rows] for i in range(0, max(1, len(rows) - 1), max_data_rows)]
+    sheet_rows = [[rows[0], *chunk] for chunk in chunks]
+
+    def col_name(index: int) -> str:
+        name = ""
+        while index:
+            index, rem = divmod(index - 1, 26)
+            name = chr(65 + rem) + name
+        return name
+
+    def cell(ref: str, value: Any) -> str:
+        if isinstance(value, (int, float)):
+            return f'<c r="{ref}"><v>{value}</v></c>'
+        value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", str(value))
+        preserve = ' xml:space="preserve"' if value[:1].isspace() or value[-1:].isspace() else ""
+        # Inline strings keep PDF content as text, including values beginning with '=' (never formulas).
+        return f'<c r="{ref}" t="inlineStr"><is><t{preserve}>{escape(value)}</t></is></c>'
+
+    def worksheet(sheet: list[list[Any]]) -> str:
+        body = []
+        for r, values in enumerate(sheet, 1):
+            body.append(f'<row r="{r}">' + "".join(cell(f"{col_name(c)}{r}", v) for c, v in enumerate(values, 1)) + "</row>")
+        return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                '<sheetData>' + "".join(body) + '</sheetData></worksheet>')
+
+    sheets = "".join(f'<sheet name="PDF Text {i}" sheetId="{i}" r:id="rId{i}"/>'
+                     for i in range(1, len(sheet_rows) + 1))
+    relationships = "".join(
+        f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i}.xml"/>'
+        for i in range(1, len(sheet_rows) + 1)
+    )
+    content_types = ''.join(
+        f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        for i in range(1, len(sheet_rows) + 1)
+    )
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                   '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                   '<Default Extension="xml" ContentType="application/xml"/>'
+                   '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                   + content_types + '</Types>')
+        z.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+                   '</Relationships>')
+        z.writestr("xl/workbook.xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+                   'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'
+                   + sheets + '</sheets></workbook>')
+        z.writestr("xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   + relationships + '</Relationships>')
+        for i, sheet in enumerate(sheet_rows, 1):
+            z.writestr(f"xl/worksheets/sheet{i}.xml", worksheet(sheet))
+    return out.getvalue()
 
 
 # ---------------------------------------------------------------- create
@@ -897,15 +978,16 @@ def summarize(data: bytes, length: str) -> dict:
     if length not in ("short", "medium", "long"):
         raise HTTPException(400, "length must be short, medium or long")
     text = to_text(data)
-    if len(text.split()) < 20:
+    if len(text.split()) < 5:
         raise HTTPException(400, "This PDF has no readable text. Run Scan & OCR first.")
     base = {"words": len(text.split())}
     if config.ANTHROPIC_API_KEY:
         try:
             return {**base, "engine": "claude", "summary": llm_summary(text, length)}
-        except HTTPException:
-            raise
-        except Exception:
-            pass  # network problem: fall back to the offline summary
+        except Exception as exc:
+            base["notice"] = f"AI summary unavailable; showing an offline summary instead ({exc.detail if isinstance(exc, HTTPException) else 'service connection failed'})."
     n = {"short": 3, "medium": 6, "long": 12}[length]
-    return {**base, "engine": "extractive", "summary": "\n".join("• " + s for s in extractive_summary(text, n))}
+    summary = "\n".join("• " + s for s in extractive_summary(text, n))
+    if not summary:
+        raise HTTPException(400, "Could not find readable sentences. Run Scan & OCR first.")
+    return {**base, "engine": "extractive", "summary": summary}

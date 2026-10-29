@@ -360,7 +360,7 @@ LOREM = ("The quarterly report shows revenue growth in the northern region. " * 
          "The board approved a new hiring plan for the support team in March. ")
 
 
-def test_new_tools():
+def test_new_tools(monkeypatch):
     h = auth()
     # create
     r = c.post("/api/create/text", headers=h, json={"text": LOREM * 20, "fontsize": 12})
@@ -370,6 +370,12 @@ def test_new_tools():
 
     # export
     assert c.get(f"/api/docs/{i}/export?fmt=docx", headers=h).content[:2] == b"PK"
+    xlsx = c.get(f"/api/docs/{i}/export?fmt=xlsx", headers=h)
+    assert xlsx.status_code == 200 and xlsx.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    workbook = zipfile.ZipFile(io.BytesIO(xlsx.content))
+    assert "xl/worksheets/sheet1.xml" in workbook.namelist()
+    sheet = workbook.read("xl/worksheets/sheet1.xml").decode()
+    assert "Page" in sheet and "quarterly report" in sheet
     assert b"<div" in c.get(f"/api/docs/{i}/export?fmt=html", headers=h).content
     z = zipfile.ZipFile(io.BytesIO(c.get(f"/api/docs/{i}/export?fmt=png&dpi=72", headers=h).content))
     assert z.namelist()[0].endswith(".png")
@@ -377,6 +383,14 @@ def test_new_tools():
     # summary (offline engine)
     r = c.post(f"/api/docs/{i}/summary", headers=h, json={"length": "short"})
     assert r.status_code == 200 and r.json()["engine"] == "extractive" and r.json()["summary"]
+    from app import config, pdfops
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "test-key")
+    def unavailable(*_args):
+        from fastapi import HTTPException
+        raise HTTPException(502, "Summary service error (401)")
+    monkeypatch.setattr(pdfops, "llm_summary", unavailable)
+    fallback = c.post(f"/api/docs/{i}/summary", headers=h, json={"length": "short"})
+    assert fallback.status_code == 200 and fallback.json()["engine"] == "extractive" and fallback.json()["notice"]
     blank = c.post("/api/create/blank", headers=h, json={"count": 1}).json()["id"]
     assert c.post(f"/api/docs/{blank}/summary", headers=h, json={"length": "short"}).status_code == 400
 
@@ -487,6 +501,13 @@ def test_new_tools():
     r = c.post("/api/compare", headers=h, files={"a": ("a.pdf", a), "b": ("b.pdf", b)}).json()
     assert not r["identical"] and r["removed"] == 1 and r["added"] == 1 and r["changes"][0]["page"] == 2
     assert c.post("/api/compare", headers=h, files={"a": ("a.pdf", a), "b": ("b.pdf", a)}).json()["identical"]
+    protected = pymupdf.open(stream=a, filetype="pdf")
+    enc = protected.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="compare-pass", owner_pw="owner")
+    protected.close()
+    protected_files = {"a": ("protected.pdf", enc), "b": ("plain.pdf", a)}
+    assert c.post("/api/compare", headers=h, files=protected_files).json()["detail"] == "PASSWORD_REQUIRED"
+    assert c.post("/api/compare", headers=h, data={"pw_a": "compare-pass"}, files=protected_files).json()["identical"]
+    assert c.post("/api/compare", headers=h, data={"pw_a": "wrong"}, files=protected_files).status_code == 400
 
 
 def test_user_management():

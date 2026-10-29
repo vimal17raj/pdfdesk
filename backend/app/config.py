@@ -24,7 +24,7 @@ ADMIN_PASSWORD = os.getenv("PDFDESK_ADMIN_PASSWORD", "admin123")
 # Optional: set to use Claude for "Generative summary". Document text is sent to Anthropic when set.
 # Left empty, summaries are produced offline on this server (extractive, no AI).
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-LLM_MODEL = os.getenv("PDFDESK_LLM_MODEL", "claude-sonnet-5-5")
+LLM_MODEL = os.getenv("PDFDESK_LLM_MODEL", "claude-sonnet-5")
 
 # 0 = no limit (uploads are streamed straight to disk, never held in memory)
 MAX_UPLOAD_MB = int(os.getenv("PDFDESK_MAX_UPLOAD_MB", "0"))

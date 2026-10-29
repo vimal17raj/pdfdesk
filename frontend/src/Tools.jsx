@@ -158,7 +158,7 @@ function Workspace({ tool, ctx }) {
 }
 
 const HELP = {
-  export: "Save this PDF as Word, text, web page or images.",
+  export: "Save this PDF as Excel, Word, text, web page or images.",
   edit: "Click a line of text to rewrite it, or pick a tool and mark up the page.",
   summary: "Get the key points of a long document in seconds.",
   sign: "Fill form fields, type text, add the date, or place your signature.",
@@ -178,6 +178,7 @@ function ExportPanel({ doc, say }) {
   return (
     <div className="stack">
       <button className="wide" onClick={() => go("docx", stem + ".docx")}>Microsoft Word (.docx)</button>
+      <button className="wide" onClick={() => go("xlsx", stem + ".xlsx")}>Microsoft Excel (.xlsx)</button>
       <button className="wide" onClick={() => go("txt", stem + ".txt")}>Plain text (.txt)</button>
       <button className="wide" onClick={() => go("html", stem + ".html")}>Web page (.html)</button>
       <button className="wide" onClick={() => go("png", stem + "_png.zip")}>Images — PNG (zip)</button>
@@ -187,7 +188,7 @@ function ExportPanel({ doc, say }) {
           <option value={100}>100 dpi (small)</option><option value={150}>150 dpi</option><option value={200}>200 dpi</option><option value={300}>300 dpi (print)</option>
         </select>
       </label>
-      <p className="muted">Word export keeps text order and pictures but not exact layout. Scanned PDFs need OCR first to export text.</p>
+      <p className="muted">Excel export puts each text block in a row with its page number. Scanned PDFs need OCR first to export text.</p>
     </div>
   );
 }
@@ -217,7 +218,7 @@ function EditPanel({ doc, act, say, ctx, etool, setEtool }) {
   );
 }
 
-function SummaryPanel({ doc, run, say, ctx }) {
+function SummaryPanel({ doc, say, ctx }) {
   const [len, setLen] = useState("medium");
   const [res, setRes] = useState(null);
   return (
@@ -227,9 +228,10 @@ function SummaryPanel({ doc, run, say, ctx }) {
           <option value="short">Short</option><option value="medium">Medium</option><option value="long">Detailed</option>
         </select>
       </label>
-      <button className="primary" onClick={() => run("Summarising…", async () => setRes(await api.summary(doc.id, len)))}>Summarise this document</button>
+      <button className="primary" onClick={() => ctx.run("Summarising…", async () => setRes(await api.summary(doc.id, len)))}>Summarise this document</button>
       {res && (
         <>
+          {res.notice && <div className="note warn">{res.notice}</div>}
           <pre className="summary">{res.summary}</pre>
           <div className="row"><button onClick={() => navigator.clipboard.writeText(res.summary).then(() => say("Copied"))}>Copy</button>
             <span className="muted">{res.words} words · {res.engine === "claude" ? "AI summary" : "offline key-sentence summary"}</span></div>
@@ -438,6 +440,7 @@ function CompressPanel({ doc, act, ctx, say }) {
       <label className="chk"><input type="radio" checked={level === "low"} onChange={() => setLevel("low")} /> Low — best quality</label>
       <label className="chk"><input type="radio" checked={level === "medium"} onChange={() => setLevel("medium")} /> Medium — recommended</label>
       <label className="chk"><input type="radio" checked={level === "high"} onChange={() => setLevel("high")} /> High — smallest file</label>
+      <label className="chk"><input type="radio" checked={level === "maximum"} onChange={() => setLevel("maximum")} /> Maximum — strongest reduction, lower image quality</label>
       <button className="primary" disabled={running} onClick={() => start(() => api.compress(doc.id, level))}>Compress</button>
       <JobStatus j={job} cancel={cancel} what="Compression" />
       {job?.status === "done" && job.before != null && <div className="note">{kb(job.before)} → <b>{kb(job.after)}</b>{job.after >= job.before ? " (already optimal)" : ` (${Math.round((1 - job.after / job.before) * 100)}% smaller)`}. Undo to restore.</div>}
@@ -670,6 +673,8 @@ function Combine({ ctx }) {
 function Compare({ ctx }) {
   const [a, setA] = useState(null);
   const [b, setB] = useState(null);
+  const [pwA, setPwA] = useState("");
+  const [pwB, setPwB] = useState("");
   const [res, setRes] = useState(null);
   const tool = TOOLS.find((t) => t.id === "compare");
   return (
@@ -677,10 +682,12 @@ function Compare({ ctx }) {
       <Head tool={tool}>Find what changed between two versions of a document (text comparison).</Head>
       <div className="card stack">
         <div className="row cmpfiles">
-          <label>Original<input type="file" accept=".pdf" onChange={(e) => { setA(e.target.files[0]); setRes(null); }} /></label>
-          <label>Revised<input type="file" accept=".pdf" onChange={(e) => { setB(e.target.files[0]); setRes(null); }} /></label>
+          <label>Original<input type="file" accept=".pdf" onChange={(e) => { setA(e.target.files[0]); setPwA(""); setRes(null); }} />
+            {a && <input type="password" autoComplete="new-password" placeholder="Password, if protected" aria-label="Original PDF password" value={pwA} onChange={(e) => setPwA(e.target.value)} />}</label>
+          <label>Revised<input type="file" accept=".pdf" onChange={(e) => { setB(e.target.files[0]); setPwB(""); setRes(null); }} />
+            {b && <input type="password" autoComplete="new-password" placeholder="Password, if protected" aria-label="Revised PDF password" value={pwB} onChange={(e) => setPwB(e.target.value)} />}</label>
         </div>
-        <button className="primary" disabled={!a || !b} onClick={() => ctx.run("Comparing…", async () => setRes(await api.compare(a, b)))}>Compare</button>
+        <button className="primary" disabled={!a || !b} onClick={() => ctx.run("Comparing…", async () => setRes(await api.compare(a, b, pwA, pwB)))}>Compare</button>
       </div>
       {res && (
         <div className="card stack">

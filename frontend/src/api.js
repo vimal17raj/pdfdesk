@@ -91,10 +91,12 @@ export const api = {
   createImages: (list) => post("/api/create/images", files("files", list)),
   merge: (list) => post("/api/merge", files("files", list)),
   append: (id, list) => post(`/api/docs/${id}/append`, files("files", list)),
-  compare: (a, b) => {
+  compare: (a, b, pwA = "", pwB = "") => {
     const f = new FormData();
     f.append("a", a);
     f.append("b", b);
+    f.append("pw_a", pwA);
+    f.append("pw_b", pwB);
     return post("/api/compare", f);
   },
 
