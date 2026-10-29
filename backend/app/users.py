@@ -17,7 +17,7 @@ _NAME = re.compile(r"^[a-z0-9._-]{2,40}$")
 
 
 def _conn():
-    c = sqlite3.connect(config.DATA_DIR / "users.db")
+    c = sqlite3.connect(config.DATA_DIR / "users.db", timeout=15)
     c.row_factory = sqlite3.Row
     c.execute(
         "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, pw TEXT NOT NULL, role TEXT NOT NULL, "
@@ -55,8 +55,8 @@ def ensure_admin():
     with _lock:
         c = _conn()
         if c.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
-            c.execute("INSERT INTO users (username,pw,role,active,must_change,created) VALUES (?,?,?,?,?,?)",
-                      ("admin", _hash(config.ADMIN_PASSWORD), "admin", 1, 1, _now()))
+            c.execute("INSERT OR IGNORE INTO users (username,pw,role,active,must_change,created) VALUES (?,?,?,?,?,?)",
+                      ("admin", _hash(config.ADMIN_PASSWORD), "admin", 1, 1, _now()))  # IGNORE: several workers start at once
             c.commit()
         c.close()
 

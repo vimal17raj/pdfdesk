@@ -4,7 +4,10 @@ from pathlib import Path
 DATA_DIR = Path(os.getenv("PDFDESK_DATA", Path(__file__).resolve().parents[1] / "data"))
 DOCS_DIR = DATA_DIR / "docs"
 DB_PATH = DATA_DIR / "audit.db"
-DOCS_DIR.mkdir(parents=True, exist_ok=True)
+JOBS_DIR = DATA_DIR / "jobs"
+TMP_DIR = DATA_DIR / "tmp"
+for _d in (DOCS_DIR, JOBS_DIR, TMP_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
 
 JWT_SECRET = os.getenv("PDFDESK_JWT_SECRET", "change-me-in-production")
 JWT_HOURS = int(os.getenv("PDFDESK_JWT_HOURS", "10"))
@@ -20,3 +23,7 @@ LLM_MODEL = os.getenv("PDFDESK_LLM_MODEL", "claude-sonnet-5-5")
 
 MAX_UPLOAD_MB =int(os.getenv("PDFDESK_MAX_UPLOAD_MB", "200"))
 OCR_LANGS = os.getenv("PDFDESK_OCR_LANGS", "eng")
+# CPU cores used by one OCR run (each core also needs ~300-500 MB of RAM on big scans)
+OCR_JOBS = int(os.getenv("PDFDESK_OCR_JOBS", str(max(1, min(os.cpu_count() or 1, 3)))))
+# Disk space used by undo history per document (oldest versions are dropped beyond this)
+HISTORY_MB = int(os.getenv("PDFDESK_HISTORY_MB", "1500"))

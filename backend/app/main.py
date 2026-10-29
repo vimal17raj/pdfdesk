@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import audit, auth, config, pdfops, store, users
+from . import audit, auth, config, jobs, pdfops, store, users
 
 app = FastAPI(title="PDFDesk")
 
@@ -20,15 +20,24 @@ async def _read(f: UploadFile) -> bytes:
     return data
 
 
-def _doc(doc_id: str, user: dict) -> tuple[bytes, dict]:
+def _doc(doc_id: str, user: dict) -> tuple[Path, dict]:
+    """Path of the current version (pdfops opens it lazily from disk) + document info. Nothing is read into memory."""
     store.check_access(doc_id, user)
-    return store.path(doc_id).read_bytes(), store.info(doc_id)
+    return store.path(doc_id), store.info(doc_id)
 
 
 def _commit(doc_id: str, user: dict, new: bytes, action: str, detail: str = "") -> dict:
     store.push(doc_id, new)
     audit.log(user["user"], action, doc_id, detail, user["ip"])
     return store.info(doc_id)
+
+
+def _edit(doc_id: str, user: dict, fn, action: str, detail: str = "") -> dict:
+    """Fast path for small edits: copy the version, apply fn(doc) to it, append only the changes."""
+    store.check_access(doc_id, user)
+    info = store.edit(doc_id, fn)
+    audit.log(user["user"], action, doc_id, detail, user["ip"])
+    return info
 
 
 def _new_doc(user: dict, name: str, data: bytes, action: str, detail: str = "") -> dict:
@@ -168,8 +177,8 @@ def share(doc_id: str, b: ShareWith, u: dict = U):
 
 @app.get("/api/docs/{doc_id}")
 def get_doc(doc_id: str, u: dict = U):
-    data, info = _doc(doc_id, u)
-    return {**info, "size": len(data), "pages": pdfops.page_sizes(data)}
+    path, info = _doc(doc_id, u)
+    return {**info, "size": path.stat().st_size, "pages": store.page_sizes(doc_id)}
 
 
 @app.delete("/api/docs/{doc_id}")
@@ -184,46 +193,55 @@ def delete_doc(doc_id: str, u: dict = U):
 
 @app.get("/api/docs/{doc_id}/page/{n}.png")
 def page_png(doc_id: str, n: int, zoom: float = 1.5, v: int = 0, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    png = pdfops.render(data, n, max(0.3, min(zoom, 4)))
-    return Response(png, media_type="image/png", headers={"Cache-Control": "private, max-age=3600"})
+    store.check_access(doc_id, u)
+    with store.reading(doc_id) as doc:
+        img = pdfops.render(doc, n, max(0.3, min(zoom, 4)))
+    return Response(img, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.get("/api/docs/{doc_id}/download")
 def download(doc_id: str, u: dict = U):
-    data, info = _doc(doc_id, u)
+    path, info = _doc(doc_id, u)
     audit.log(u["user"], "download", doc_id, info["name"], u["ip"])
-    return _pdf(data, info["name"])
+    name = info["name"] if info["name"].lower().endswith(".pdf") else info["name"] + ".pdf"
+    return FileResponse(path, media_type="application/pdf", filename=name)  # streamed from disk, not loaded into memory
 
 
 @app.get("/api/docs/{doc_id}/page/{n}/lines")
 def lines(doc_id: str, n: int, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    return pdfops.text_lines(data, n)
+    store.check_access(doc_id, u)
+    with store.reading(doc_id) as doc:
+        return pdfops.text_lines(doc, n)
 
 
 @app.get("/api/docs/{doc_id}/page/{n}/annots")
 def annots(doc_id: str, n: int, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    return pdfops.list_annots(data, n)
+    store.check_access(doc_id, u)
+    with store.reading(doc_id) as doc:
+        return pdfops.list_annots(doc, n)
 
 
 @app.get("/api/docs/{doc_id}/comments")
 def comments(doc_id: str, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    return pdfops.all_comments(data)
+    store.check_access(doc_id, u)
+    with store.reading(doc_id) as doc:
+        return pdfops.all_comments(doc)
 
 
 @app.get("/api/docs/{doc_id}/outline")
 def outline(doc_id: str, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    return pdfops.outline(data)
+    store.check_access(doc_id, u)
+    with store.reading(doc_id) as doc:
+        return pdfops.outline(doc)
 
 
 @app.get("/api/docs/{doc_id}/search")
 def search(doc_id: str, q: str, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    return pdfops.search_text(data, q) if q.strip() else []
+    store.check_access(doc_id, u)
+    if not q.strip():
+        return []
+    with store.reading(doc_id) as doc:
+        return pdfops.search_text(doc, q)
 
 
 @app.post("/api/docs/{doc_id}/undo")
@@ -298,9 +316,8 @@ class EditText(BaseModel):
 
 @app.post("/api/docs/{doc_id}/edit-text")
 def edit_text(doc_id: str, b: EditText, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    return _commit(doc_id, u, pdfops.edit_text(data, b.page, b.bbox, b.text, b.size, b.color),
-                   "edit_text", f"page {b.page + 1}")
+    return _edit(doc_id, u, lambda d: pdfops.edit_text(d, b.page, b.bbox, b.text, b.size, b.color),
+                 "edit_text", f"page {b.page + 1}")
 
 
 class Annot(BaseModel):
@@ -316,10 +333,9 @@ class Annot(BaseModel):
 
 @app.post("/api/docs/{doc_id}/annotate")
 def annotate(doc_id: str, b: Annot, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    d = b.model_dump(exclude_none=True)
-    return _commit(doc_id, u, pdfops.annotate(data, b.page, d, u["user"]),
-                   "redact" if b.type == "redact" else "annotate", f"{b.type} page {b.page + 1}")
+    spec = b.model_dump(exclude_none=True)
+    return _edit(doc_id, u, lambda d: pdfops.annotate(d, b.page, spec, u["user"]),
+                 "redact" if b.type == "redact" else "annotate", f"{b.type} page {b.page + 1}")
 
 
 class DelAnnot(BaseModel):
@@ -329,8 +345,7 @@ class DelAnnot(BaseModel):
 
 @app.post("/api/docs/{doc_id}/delete-annot")
 def delete_annot(doc_id: str, b: DelAnnot, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    return _commit(doc_id, u, pdfops.delete_annot(data, b.page, b.xref), "delete_annot", f"page {b.page + 1}")
+    return _edit(doc_id, u, lambda d: pdfops.delete_annot(d, b.page, b.xref), "delete_annot", f"page {b.page + 1}")
 
 
 # ---------- organize ----------
@@ -343,9 +358,8 @@ class PagesOp(BaseModel):
 
 @app.post("/api/docs/{doc_id}/pages")
 def pages(doc_id: str, b: PagesOp, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    return _commit(doc_id, u, pdfops.pages_op(data, b.op, b.pages, b.angle, b.order), f"pages_{b.op}",
-                   ",".join(str(p + 1) for p in b.pages))
+    return _edit(doc_id, u, lambda d: pdfops.pages_op(d, b.op, b.pages, b.angle, b.order), f"pages_{b.op}",
+                 ",".join(str(p + 1) for p in b.pages))
 
 
 class Extract(BaseModel):
@@ -354,9 +368,9 @@ class Extract(BaseModel):
 
 @app.post("/api/docs/{doc_id}/extract")
 def extract(doc_id: str, b: Extract, u: dict = U):
-    data, info = _doc(doc_id, u)
+    path, info = _doc(doc_id, u)
     audit.log(u["user"], "extract", doc_id, ",".join(str(p + 1) for p in b.pages), u["ip"])
-    return _pdf(pdfops.extract(data, b.pages), f"{_stem(info['name'])}_extract.pdf")
+    return _pdf(pdfops.extract(path, b.pages), f"{_stem(info['name'])}_extract.pdf")
 
 
 class Split(BaseModel):
@@ -365,9 +379,9 @@ class Split(BaseModel):
 
 @app.post("/api/docs/{doc_id}/split")
 def split(doc_id: str, b: Split, u: dict = U):
-    data, info = _doc(doc_id, u)
-    groups = pdfops.parse_ranges(b.ranges, len(pdfops.page_sizes(data)))
-    zipped = pdfops.split(data, groups, _stem(info["name"]))
+    path, info = _doc(doc_id, u)
+    groups = pdfops.parse_ranges(b.ranges, len(store.page_sizes(doc_id)))
+    zipped = pdfops.split(path, groups, _stem(info["name"]))
     audit.log(u["user"], "split", doc_id, b.ranges, u["ip"])
     return _file(zipped, f"{_stem(info['name'])}_split.zip", "application/zip")
 
@@ -383,23 +397,52 @@ async def merge(files: list[UploadFile] = File(...), u: dict = U):
 
 @app.post("/api/docs/{doc_id}/append")
 async def append(doc_id: str, files: list[UploadFile] = File(...), u: dict = U):
-    data, _ = _doc(doc_id, u)
-    blobs = [data] + [await _read(f) for f in files]
+    path, _ = _doc(doc_id, u)
+    blobs = [path.read_bytes()] + [await _read(f) for f in files]
     return _commit(doc_id, u, pdfops.merge(blobs), "append", ", ".join(f.filename or "?" for f in files)[:300])
 
 
 # ---------- OCR / compress / watermark ----------
+def _job_result(doc_id: str, u: dict, tmp: Path, base_version: int, name: str, suffix: str, action: str, detail: str) -> dict:
+    """Store a finished job's output. If the document was edited while the job ran, saving it over the top would
+    lose those edits, so it becomes a separate document instead."""
+    if store.commit_file(doc_id, tmp, base_version):
+        audit.log(u["user"], action, doc_id, detail, u["ip"])
+        return {"doc_id": doc_id, "new": False, "message": "Done"}
+    stem = _stem(name)
+    new_id = store.create_from_file(u["user"], f"{stem} ({suffix}).pdf", tmp)
+    audit.log(u["user"], action, new_id, detail + " (saved as a separate document: original changed meanwhile)", u["ip"])
+    return {"doc_id": new_id, "new": True,
+            "message": f"The document was changed while this ran, so the result was saved as a new document: {stem} ({suffix}).pdf"}
+
+
 class Ocr(BaseModel):
     langs: str | None = None
     force: bool = False
     deskew: bool = True
+    pages: str | None = None  # e.g. "1-50" or "1,3,7-9"; empty = whole document
 
 
 @app.post("/api/docs/{doc_id}/ocr")
 def run_ocr(doc_id: str, b: Ocr, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    out = pdfops.ocr(data, b.langs, b.force, b.deskew)
-    return _commit(doc_id, u, out, "ocr", f"langs={b.langs or config.OCR_LANGS}")
+    """Starts OCR in the background and returns a job; poll /api/jobs/{id}."""
+    path, info = _doc(doc_id, u)
+    langs, pages = pdfops.check_ocr_args(b.langs, b.pages)
+    base = info["version"]
+
+    def worker(job, cancelled):
+        tmp = config.TMP_DIR / f"{job['id']}.pdf"
+        try:
+            pdfops.ocr_file(path, tmp, langs, b.force, b.deskew, pages, cancelled, job["log"])
+            return _job_result(doc_id, u, tmp, base, info["name"], "OCR", "ocr", f"langs={langs} pages={pages or 'all'}")
+        finally:
+            for f in (tmp, Path(job["log"])):
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError:
+                    pass  # a lingering handle (Windows); harmless leftover in data/tmp
+
+    return jobs.start("ocr", doc_id, u["user"], worker)
 
 
 class Compress(BaseModel):
@@ -408,10 +451,36 @@ class Compress(BaseModel):
 
 @app.post("/api/docs/{doc_id}/compress")
 def compress(doc_id: str, b: Compress, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    out = pdfops.compress(data, b.level)
-    info = _commit(doc_id, u, out, "compress", f"{b.level}: {len(data)//1024} KB -> {len(out)//1024} KB")
-    return {**info, "before": len(data), "after": len(out)}
+    path, info = _doc(doc_id, u)
+    pdfops.check_level(b.level)
+    base = info["version"]
+
+    def worker(job, cancelled):
+        tmp = config.TMP_DIR / f"{job['id']}.pdf"
+        try:
+            before = path.stat().st_size
+            pdfops.compress_file(path, tmp, b.level)
+            after = tmp.stat().st_size
+            if after >= before:  # nothing to gain: keep the original
+                return {"doc_id": doc_id, "new": False, "before": before, "after": before, "message": "Already optimal"}
+            res = _job_result(doc_id, u, tmp, base, info["name"], "compressed", "compress",
+                              f"{b.level}: {before // 1024} KB -> {after // 1024} KB")
+            return {**res, "before": before, "after": after}
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    return jobs.start("compress", doc_id, u["user"], worker)
+
+
+@app.get("/api/jobs/{job_id}")
+def job_status(job_id: str, u: dict = U):
+    return jobs.get(job_id, u)
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def job_cancel(job_id: str, u: dict = U):
+    jobs.cancel(job_id, u)
+    return {"ok": True}
 
 
 class Watermark(BaseModel):
@@ -420,15 +489,15 @@ class Watermark(BaseModel):
 
 @app.post("/api/docs/{doc_id}/watermark")
 def watermark(doc_id: str, b: Watermark, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    return _commit(doc_id, u, pdfops.watermark(data, b.text[:60]), "watermark", b.text[:60])
+    return _edit(doc_id, u, lambda d: pdfops.watermark(d, b.text[:60]), "watermark", b.text[:60])
 
 
 # ---------- forms / signatures / stamps ----------
 @app.get("/api/docs/{doc_id}/fields")
 def fields(doc_id: str, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    return pdfops.list_fields(data)
+    store.check_access(doc_id, u)
+    with store.reading(doc_id) as doc:
+        return pdfops.list_fields(doc)
 
 
 class Fill(BaseModel):
@@ -437,8 +506,7 @@ class Fill(BaseModel):
 
 @app.post("/api/docs/{doc_id}/fill")
 def fill(doc_id: str, b: Fill, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    return _commit(doc_id, u, pdfops.fill_fields(data, b.values), "fill_form", f"{len(b.values)} field(s)")
+    return _edit(doc_id, u, lambda d: pdfops.fill_fields(d, b.values), "fill_form", f"{len(b.values)} field(s)")
 
 
 class AddField(BaseModel):
@@ -451,9 +519,8 @@ class AddField(BaseModel):
 
 @app.post("/api/docs/{doc_id}/add-field")
 def add_field(doc_id: str, b: AddField, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    return _commit(doc_id, u, pdfops.add_field(data, b.page, b.rect, b.type, b.name, b.options),
-                   "add_field", f"{b.type} page {b.page + 1}")
+    return _edit(doc_id, u, lambda d: pdfops.add_field(d, b.page, b.rect, b.type, b.name, b.options),
+                 "add_field", f"{b.type} page {b.page + 1}")
 
 
 class PlaceImage(BaseModel):
@@ -465,9 +532,8 @@ class PlaceImage(BaseModel):
 
 @app.post("/api/docs/{doc_id}/sign")
 def sign(doc_id: str, b: PlaceImage, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    return _commit(doc_id, u, pdfops.place_image(data, b.page, b.rect, b.image, b.label, u["user"]),
-                   "sign" if b.label == "Signature" else "place_image", f"{b.label} page {b.page + 1}")
+    return _edit(doc_id, u, lambda d: pdfops.place_image(d, b.page, b.rect, b.image, b.label, u["user"]),
+                 "sign" if b.label == "Signature" else "place_image", f"{b.label} page {b.page + 1}")
 
 
 class UpdateAnnot(BaseModel):
@@ -482,9 +548,8 @@ class UpdateAnnot(BaseModel):
 
 @app.post("/api/docs/{doc_id}/update-annot")
 def update_annot(doc_id: str, b: UpdateAnnot, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    out = pdfops.update_annot(data, b.page, b.xref, b.rect, b.text, b.color, b.width, b.size)
-    return _commit(doc_id, u, out, "update_object", f"page {b.page + 1}")
+    return _edit(doc_id, u, lambda d: pdfops.update_annot(d, b.page, b.xref, b.rect, b.text, b.color, b.width, b.size),
+                 "update_object", f"page {b.page + 1}")
 
 
 class FieldRef(BaseModel):
@@ -495,14 +560,12 @@ class FieldRef(BaseModel):
 
 @app.post("/api/docs/{doc_id}/delete-field")
 def delete_field(doc_id: str, b: FieldRef, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    return _commit(doc_id, u, pdfops.delete_field(data, b.name), "delete_field", b.name[:60])
+    return _edit(doc_id, u, lambda d: pdfops.delete_field(d, b.name), "delete_field", b.name[:60])
 
 
 @app.post("/api/docs/{doc_id}/update-field")
 def update_field(doc_id: str, b: FieldRef, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    return _commit(doc_id, u, pdfops.update_field(data, b.name, b.rect, b.new_name), "update_field", b.name[:60])
+    return _edit(doc_id, u, lambda d: pdfops.update_field(d, b.name, b.rect, b.new_name), "update_field", b.name[:60])
 
 
 class Stamp(BaseModel):
@@ -516,9 +579,8 @@ class Stamp(BaseModel):
 
 @app.post("/api/docs/{doc_id}/stamp")
 def stamp(doc_id: str, b: Stamp, u: dict = U):
-    data, _ = _doc(doc_id, u)
-    out = pdfops.stamp(data, b.pages, b.center, b.text, b.color, b.size, b.date, u["user"])
-    return _commit(doc_id, u, out, "stamp", f"{b.text[:30]} on {len(b.pages)} page(s)")
+    return _edit(doc_id, u, lambda d: pdfops.stamp(d, b.pages, b.center, b.text, b.color, b.size, b.date, u["user"]),
+                 "stamp", f"{b.text[:30]} on {len(b.pages)} page(s)")
 
 
 # ---------- protect ----------

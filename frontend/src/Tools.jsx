@@ -3,6 +3,7 @@ import { api, download } from "./api.js";
 import Viewer from "./Viewer.jsx";
 
 export const TOOLS = [
+  { id: "view", label: "View & search", icon: "👁", needsDoc: true },
   { id: "export", label: "Export a PDF", icon: "⤓", needsDoc: true },
   { id: "edit", label: "Edit a PDF", icon: "✎", needsDoc: true },
   { id: "create", label: "Create a PDF", icon: "＋" },
@@ -45,9 +46,9 @@ function OpenPrompt({ ctx, tool }) {
         onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)}
         onDrop={(e) => { e.preventDefault(); setDrag(false); e.dataTransfer.files[0] && ctx.openFile(e.dataTransfer.files[0]); }}
         onClick={ctx.openPicker}>
-        <h2>{tool.label}</h2>
+        <h2>{tool.id === "view" ? "Open a PDF" : tool.label}</h2>
         <p>Drop a PDF (or a scan / photo) here, or click to choose a file.</p>
-        <p className="muted">Or use File → Open / Recent files. Ctrl+O</p>
+        <p className="muted">{tool.id === "view" ? "It opens for viewing and searching only. Choose what to do with it later from All tools — edit, OCR, convert, protect…" : "Or use File → Open / Recent files. Ctrl+O"}</p>
       </div>
     </div>
   );
@@ -87,6 +88,7 @@ function Workspace({ tool, ctx }) {
   // `armed`: stamp / signature tools place one object per arming, then drop back to Select so it can be moved or deleted
   let mode = "none", onPlace, onRect, ghost, askText = false, fillUI = null, fieldBoxes = null, fieldObjs = null;
   const showLines = id === "edit" && etool === "select";
+  if (id === "view") mode = "view"; // read-only: nothing can be selected, clicked into or changed by accident
   if (id === "edit") mode = etool;
   if (id === "comment") { mode = ctool; askText = ["highlight", "underline", "strike"].includes(ctool); }
   if (id === "sign") {
@@ -122,7 +124,7 @@ function Workspace({ tool, ctx }) {
       }), "Field added");
     } else fieldObjs = fields;
   }
-  if (!sideOpen) { mode = id === "edit" ? "select" : "none"; onPlace = onRect = ghost = undefined; fieldBoxes = null; }
+  if (!sideOpen && id !== "view") { mode = id === "edit" ? "select" : "none"; onPlace = onRect = ghost = undefined; fieldBoxes = null; }
   if (pending) {
     mode = "place";
     ghost = pending.kind === "image" ? { img: pending.img, w: pending.w, h: pending.h } : { label: pending.text, w: pending.w, h: pending.h };
@@ -134,8 +136,8 @@ function Workspace({ tool, ctx }) {
     <div className="work">
       <Viewer doc={doc} mode={mode} act={act} zoom={zoom} setZoom={setZoom} hits={hits} curHit={ctx.hitIdx} showLines={showLines}
         askText={askText} fillUI={fillUI} fieldBoxes={fieldBoxes} fieldObjs={fieldObjs} onPlace={onPlace} onRect={onRect} ghost={ghost} ctx={{ setTool: ctx.setTool, tool }} />
-      {!sideOpen && <button className="sidetab" title="Show tool options" onClick={() => setSideOpen(true)}>◂ {tool.label}</button>}
-      {sideOpen && <aside className="side">
+      {!sideOpen && id !== "view" && <button className="sidetab" title="Show tool options" onClick={() => setSideOpen(true)}>◂ {tool.label}</button>}
+      {sideOpen && id !== "view" && <aside className="side">
         <button className="sideclose" title="Close this panel" onClick={() => setSideOpen(false)}>✕</button>
         <Head tool={tool}>{HELP[id]}</Head>
         {id === "export" && <ExportPanel {...p} />}
@@ -320,9 +322,66 @@ function SignPanel({ doc, act, say, item, setItem, sig, ini, saveSig, freeText, 
   );
 }
 
+// Long operations (OCR, compress) run on the server in the background: start, poll, show progress, allow cancel.
+function useJob(ctx, doc, say) {
+  const [job, setJob] = useState(null);
+  const timer = useRef();
+  const stop = () => clearTimeout(timer.current);
+  useEffect(() => stop, []);
+  const poll = (id) => {
+    timer.current = setTimeout(async () => {
+      try {
+        const j = await api.job(id);
+        setJob(j);
+        if (j.status === "running") return poll(id);
+        if (j.status === "done") {
+          if (j.doc_id && j.doc_id !== doc.id) await ctx.openDoc(j.doc_id);
+          else await ctx.load(doc.id);
+          if (j.message && j.message !== "Done") say(j.message);
+        }
+      } catch (e) {
+        setJob({ status: "error", error: e.message });
+      }
+    }, 2000);
+  };
+  const start = async (fn) => {
+    stop();
+    setJob({ status: "running", elapsed: 0, starting: true });
+    try {
+      const j = await fn();
+      setJob(j);
+      poll(j.id);
+    } catch (e) {
+      setJob({ status: "error", error: e.message });
+    }
+  };
+  const cancel = () => job?.id && api.cancelJob(job.id).catch(() => {});
+  return { job, start, cancel, running: job?.status === "running" };
+}
+
+const mmss = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+
+function JobStatus({ j, cancel, what }) {
+  if (!j) return null;
+  if (j.status === "running")
+    return (
+      <div className="note">
+        <div className="row"><div className="spin small" /> <b>{what} running…</b> <span className="muted">{j.starting ? "starting" : mmss(j.elapsed)}</span></div>
+        {j.progress != null && <div className="bar"><div style={{ width: j.progress + "%" }} /></div>}
+        <div className="muted">Large files can take several minutes. You can keep reading, but wait before editing this document.</div>
+        <button onClick={cancel}>Cancel</button>
+      </div>
+    );
+  if (j.status === "cancelled") return <div className="note warn">Cancelled.</div>;
+  if (j.status === "error") return <div className="note warn">Failed: {j.error}</div>;
+  if (j.status === "done") return <div className="note ok">Finished in {mmss(j.elapsed)}.{j.message && j.message !== "Done" ? " " + j.message : ""}</div>;
+  return null;
+}
+
 function OcrPanel({ doc, act, ctx, say }) {
   const { me, openDoc, run } = ctx;
-  const [v, setV] = useState({ langs: me.ocr_langs, force: false, deskew: true });
+  const [v, setV] = useState({ langs: me.ocr_langs, force: false, deskew: true, pages: "" });
+  const { job, start, cancel, running } = useJob(ctx, doc, say);
   const sc = useRef();
   const scan = (list) => run("Importing scans…", async () => {
     const pdf = list.length === 1 && /\.pdf$/i.test(list[0].name);
@@ -336,7 +395,10 @@ function OcrPanel({ doc, act, ctx, say }) {
       <label>Languages<input value={v.langs} onChange={(e) => setV({ ...v, langs: e.target.value })} title="e.g. eng, eng+tam, eng+hin" /></label>
       <label className="chk"><input type="checkbox" checked={v.deskew} onChange={(e) => setV({ ...v, deskew: e.target.checked })} /> Straighten crooked pages</label>
       <label className="chk"><input type="checkbox" checked={v.force} onChange={(e) => setV({ ...v, force: e.target.checked })} /> Re-OCR pages that already have text</label>
-      <button className="primary" disabled={!me.ocr} onClick={() => act("Running OCR (can take a few minutes)…", () => api.ocr(doc.id, v), "Done — the text is now searchable and copyable")}>Run OCR</button>
+      <label>Pages (blank = all {doc.pages.length})<input value={v.pages} placeholder="e.g. 1-50 or 1,3,7-9" onChange={(e) => setV({ ...v, pages: e.target.value })} /></label>
+      {doc.pages.length > 100 && !v.pages.trim() && <div className="note warn">{doc.pages.length} pages is a long job — roughly a few seconds per page. Try a page range first (e.g. 1-20) to check the result.</div>}
+      <button className="primary" disabled={!me.ocr || running} onClick={() => start(() => api.ocr(doc.id, v))}>Run OCR</button>
+      <JobStatus j={job} cancel={cancel} what="OCR" />
       <hr />
       <b>Bring in scans</b>
       <button onClick={() => sc.current.click()}>Choose scanned images / PDF…</button>
@@ -366,17 +428,18 @@ function ProtectPanel({ doc, say }) {
   );
 }
 
-function CompressPanel({ doc, act }) {
+function CompressPanel({ doc, act, ctx, say }) {
   const [level, setLevel] = useState("medium");
-  const [last, setLast] = useState(null);
+  const { job, start, cancel, running } = useJob(ctx, doc, say);
   return (
     <div className="stack">
       <div className="note">Current size: <b>{kb(doc.size)}</b></div>
       <label className="chk"><input type="radio" checked={level === "low"} onChange={() => setLevel("low")} /> Low — best quality</label>
       <label className="chk"><input type="radio" checked={level === "medium"} onChange={() => setLevel("medium")} /> Medium — recommended</label>
       <label className="chk"><input type="radio" checked={level === "high"} onChange={() => setLevel("high")} /> High — smallest file</label>
-      <button className="primary" onClick={() => act("Compressing…", async () => { const r = await api.compress(doc.id, level); setLast(r); return r; })}>Compress</button>
-      {last && <div className="note">{kb(last.before)} → <b>{kb(last.after)}</b>{last.after >= last.before ? " (already optimal)" : ` (${Math.round((1 - last.after / last.before) * 100)}% smaller)`}. Undo to restore.</div>}
+      <button className="primary" disabled={running} onClick={() => start(() => api.compress(doc.id, level))}>Compress</button>
+      <JobStatus j={job} cancel={cancel} what="Compression" />
+      {job?.status === "done" && job.before != null && <div className="note">{kb(job.before)} → <b>{kb(job.after)}</b>{job.after >= job.before ? " (already optimal)" : ` (${Math.round((1 - job.after / job.before) * 100)}% smaller)`}. Undo to restore.</div>}
     </div>
   );
 }

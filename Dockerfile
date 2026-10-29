@@ -21,4 +21,7 @@ COPY --from=web /web/dist /app/frontend/dist
 ENV PDFDESK_DATA=/data
 VOLUME /data
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Several worker processes: PyMuPDF holds the interpreter lock while it works, so one process would make
+# every user wait behind someone's 900-page page render. Override with PDFDESK_WORKERS.
+ENV PDFDESK_WORKERS=3
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${PDFDESK_WORKERS}"]

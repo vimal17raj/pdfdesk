@@ -12,5 +12,10 @@ services:
       # Admin must choose a new password at first sign-in. Add other users in the app (Users button).
       PDFDESK_ADMIN_PASSWORD: "ChangeMe-First-Login-123"
       PDFDESK_OCR_LANGS: "eng"
+      # Performance for big files (500-900 pages). Match these to the server's CPU cores / RAM.
+      PDFDESK_WORKERS: "3"        # web worker processes
+      PDFDESK_OCR_JOBS: "2"       # CPU cores used by one OCR run (each needs ~300-500 MB RAM on big scans)
+      PDFDESK_MAX_JOBS: "2"       # OCR/compress runs allowed at the same time on the server
+      PDFDESK_HISTORY_MB: "1500"  # undo-history disk space per document
       # Optional AI summaries (document text is sent to Anthropic when set). Empty = offline summaries.
       ANTHROPIC_API_KEY: ""

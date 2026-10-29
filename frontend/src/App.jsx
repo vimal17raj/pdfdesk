@@ -51,7 +51,7 @@ const imgSize = (url) => new Promise((res) => { const i = new Image(); i.onload 
 
 function Shell({ me, reloadMe, onLogout }) {
   const [doc, setDoc] = useState(null);
-  const [tool, setTool] = useState("edit");
+  const [tool, setTool] = useState("view");
   const [zoom, setZoom] = useState(1.2);
   const [busy, setBusy] = useState("");
   const [toast, setToast] = useState(null);
@@ -95,14 +95,14 @@ function Shell({ me, reloadMe, onLogout }) {
     handle.current = null;
     setHits([]);
     if (toolId) setTool(toolId);
-    else if (!TOOLS.find((t) => t.id === tool)?.needsDoc && tool !== "audit") setTool("edit");
+    else if (!TOOLS.find((t) => t.id === tool)?.needsDoc) setTool("view"); // open for viewing first; pick a tool later
   };
 
   const refreshRecent = () => api.recent().then(setRecent).catch(() => {});
   useEffect(() => { refreshRecent(); }, [doc?.id, doc?.version]);
   useEffect(() => {
     const m = location.hash.match(/doc=([a-z0-9]+)/);
-    if (m) run("Opening…", () => openDoc(m[1], "edit"));
+    if (m) run("Opening…", () => openDoc(m[1]));
   }, []);
 
   // ---------- File menu actions ----------
@@ -258,16 +258,18 @@ function Shell({ me, reloadMe, onLogout }) {
     return () => { window.removeEventListener("keydown", k); window.removeEventListener("paste", onPaste); };
   });
 
-  const showHit = (i) => {
+  const showHit = (i, list = hits) => {
     setHitIdx(i);
-    setTimeout(() => document.getElementById("hit" + i)?.scrollIntoView({ behavior: "smooth", block: "center" }), 30);
+    // pages far from the one on screen are empty boxes, so jump to the page first, then centre the match once it has drawn
+    document.getElementById("pg" + list[i]?.page)?.scrollIntoView({ block: "start" });
+    setTimeout(() => document.getElementById("hit" + i)?.scrollIntoView({ behavior: "smooth", block: "center" }), 350);
   };
   const doFind = async (q) => {
     if (!q.trim()) return setHits([]);
     const h = (await api.search(doc.id, q).catch((e) => (say(e.message, true), []))).map((x, i) => ({ ...x, gi: i }));
     setHits(h);
     setFind((f) => ({ ...f, done: q }));
-    if (h.length) showHit(0);
+    if (h.length) showHit(0, h);
     else say("No matches");
   };
   const stepHit = (d) => {
@@ -341,7 +343,7 @@ function Shell({ me, reloadMe, onLogout }) {
   return (
     <div className="shell">
       <header>
-        <b className="logo" onClick={() => setTool("edit")}>PDFDesk</b>
+        <b className="logo" onClick={() => setTool("view")}>PDFDesk</b>
         <MenuBar menus={MENUS} />
         <div className="qa">
           <button title="Undo (Ctrl+Z)" disabled={!has || doc.version <= 1} onClick={undo}>↶</button>
@@ -370,7 +372,7 @@ function Shell({ me, reloadMe, onLogout }) {
             }} />
           <button onClick={() => (find.done === find.q ? stepHit(1) : doFind(find.q))}>{find.done === find.q && hits.length ? "Next ›" : "Find"}</button>
           <button title="Previous match (Shift+Enter)" disabled={hits.length < 2} onClick={() => stepHit(-1)}>‹ Previous</button>
-          <span className="muted">{hits.length ? `${hitIdx + 1} of ${hits.length}` : find.done === find.q && find.q ? "No matches" : ""}</span>
+          <span className="muted">{hits.length ? `${hitIdx + 1} of ${hits.length}${hits.length >= 2000 ? "+ (showing the first 2000)" : ""}` : find.done === find.q && find.q ? "No matches" : ""}</span>
           <button onClick={() => { setFind(null); setHits([]); }}>✕</button>
         </div>
       )}

@@ -12,6 +12,10 @@ Self-hosted PDF tool (Adobe Acrobat alternative): FastAPI + PyMuPDF + OCRmyPDF b
 
 **Objects are editable like in Acrobat:** stamps, signatures, pasted images, text boxes, boxes/ellipses, notes, highlights, drawings and form fields can be clicked to select. Drag to move, drag handles to resize (pictures keep their proportions), double-click to edit text, use the floating bar for colour / font size / line thickness, and press Delete (or 🗑) to remove. Stamps placed with an older version are flattened into the page — Undo removes those.
 
+**Open first, decide later:** a PDF opens in **View & search** mode (read-only, with Find, thumbnails, bookmarks, zoom). Nothing can be changed by accident; pick Edit, OCR, Convert, etc. from **All tools** when you want them.
+
+**Big files (500–900 pages):** the server keeps the open document in memory between clicks, edits copy the file and append only the change (≈0.5 s on a 190 MB file), pages render on demand as JPEG, and the browser draws only the pages near the one on screen. OCR and Compress run as background jobs with elapsed time, progress, cancel, and an optional page range (e.g. `1-50`); if the document is edited while a job runs, the result is saved as a separate document instead of overwriting the edits. Find stops at 2000 matches. Undo history is capped at 30 steps and `PDFDESK_HISTORY_MB` (default 1500) per document. Use 3+ CPU cores and 4+ GB RAM for 900-page scans; set `PDFDESK_WORKERS` (default 3), `PDFDESK_OCR_JOBS` (cores per OCR run).
+
 ## Run (production, Docker)
 ```
 docker compose up -d --build

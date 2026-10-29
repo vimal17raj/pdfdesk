@@ -30,6 +30,92 @@ def auth():
     return {"Authorization": "Bearer " + r.json()["token"]}
 
 
+def wait_job(h, job, timeout=120):
+    import time
+    end = time.time() + timeout
+    while time.time() < end:
+        j = c.get(f"/api/jobs/{job['id']}", headers=h).json()
+        if j["status"] != "running":
+            return j
+        time.sleep(0.2)
+    raise AssertionError("job did not finish")
+
+
+def test_big_document():
+    """500+ pages: edits must append (not rewrite), reads must reuse the open document, history must stay bounded."""
+    import time
+    h = auth()
+    d = pymupdf.open()
+    for k in range(600):
+        d.new_page().insert_text((72, 100), f"Page number {k + 1} unique{k}", fontsize=12)
+    data = d.tobytes(deflate=True)
+    i = c.post("/api/docs", files={"file": ("big.pdf", data, "application/pdf")}, headers=h).json()["id"]
+
+    t = time.time()
+    doc = c.get(f"/api/docs/{i}", headers=h).json()
+    assert len(doc["pages"]) == 600 and time.time() - t < 5
+    assert c.get(f"/api/docs/{i}/page/599.png?zoom=1", headers=h).headers["content-type"] == "image/jpeg"
+
+    hits = c.get(f"/api/docs/{i}/search?q=unique59", headers=h).json()
+    assert {x["page"] for x in hits} >= {59, 590}
+
+    # an edit appends to a copy: the new version is only slightly larger than the old one, and is much faster than a rewrite
+    t = time.time()
+    r = c.post(f"/api/docs/{i}/annotate", headers=h, json={"page": 300, "type": "rect", "rect": [50, 50, 200, 120]})
+    assert r.status_code == 200 and r.json()["version"] == 2
+    assert time.time() - t < 5
+    v1, v2 = (Path(os.environ["PDFDESK_DATA"]) / "docs" / i / f"v{n}.pdf" for n in (1, 2))
+    assert v1.stat().st_size < v2.stat().st_size < v1.stat().st_size + 20_000
+    assert [a["type"] for a in c.get(f"/api/docs/{i}/page/300/annots", headers=h).json()] == ["Square"]
+    assert c.get(f"/api/docs/{i}/page/301/annots", headers=h).json() == []
+
+    # undo/redo switch the shared open document too
+    assert c.post(f"/api/docs/{i}/undo", headers=h).json()["version"] == 1
+    assert c.get(f"/api/docs/{i}/page/300/annots", headers=h).json() == []
+    assert c.post(f"/api/docs/{i}/redo", headers=h).json()["version"] == 2
+    assert len(c.get(f"/api/docs/{i}/page/300/annots", headers=h).json()) == 1
+
+    # page operations that restructure the file still work (full rewrite fallback)
+    assert c.post(f"/api/docs/{i}/pages", headers=h, json={"op": "delete", "pages": [0, 1]}).status_code == 200
+    assert len(c.get(f"/api/docs/{i}", headers=h).json()["pages"]) == 598
+
+    # history is capped at 30 undo steps
+    for k in range(35):
+        assert c.post(f"/api/docs/{i}/annotate", headers=h, json={"page": 5, "type": "rect", "rect": [10, 10 + k, 60, 40 + k]}).status_code == 200
+    files = sorted((Path(os.environ["PDFDESK_DATA"]) / "docs" / i).glob("v*.pdf"))
+    assert len(files) <= 31
+
+    # download streams the current version
+    assert c.get(f"/api/docs/{i}/download", headers=h).content[:5] == b"%PDF-"
+
+
+def test_job_cancel_and_stale():
+    import time
+    from app import jobs, pdfops
+    h = auth()
+    i = c.post("/api/docs", files={"file": ("t.pdf", make_pdf(2))}, headers=h).json()["id"]
+
+    def slow(job, cancelled):
+        while not cancelled():
+            time.sleep(0.1)
+        raise pdfops.Cancelled()
+
+    job = jobs.start("test", i, "admin", slow)
+    assert c.get(f"/api/jobs/{job['id']}", headers=h).json()["status"] == "running"
+    assert c.post(f"/api/jobs/{job['id']}/cancel", headers=h).status_code == 200
+    assert wait_job(h, job)["status"] == "cancelled"
+
+    boom = jobs.start("test", i, "admin", lambda j, cancelled: (_ for _ in ()).throw(RuntimeError("bad")))
+    assert wait_job(h, boom)["status"] == "error"
+    assert c.get("/api/jobs/doesnotexist", headers=h).status_code == 404
+
+    # a job whose heartbeat stopped (server restarted) is reported as failed, not "running" forever
+    import json as _j
+    f = Path(os.environ["PDFDESK_DATA"]) / "jobs" / f"{job['id']}.json"
+    j = _j.loads(f.read_text()); j.update(status="running", updated=time.time() - 500); f.write_text(_j.dumps(j))
+    assert c.get(f"/api/jobs/{job['id']}", headers=h).json()["status"] == "error"
+
+
 def test_flow():
     assert c.post("/api/auth/login", json={"username": "admin", "password": "bad"}).status_code == 401
     assert c.get("/api/me").status_code == 401
@@ -70,8 +156,9 @@ def test_flow():
     assert c.post(f"/api/docs/{i}/undo", headers=h).json()["version"] > 0
     assert c.post(f"/api/docs/{i}/redo", headers=h).status_code == 200
     assert c.post(f"/api/docs/{i}/watermark", headers=h, json={"text": "DRAFT"}).status_code == 200
-    r = c.post(f"/api/docs/{i}/compress", headers=h, json={"level": "high"})
-    assert r.status_code == 200 and r.json()["after"] <= r.json()["before"]
+    r = wait_job(h, c.post(f"/api/docs/{i}/compress", headers=h, json={"level": "high"}).json())
+    assert r["status"] == "done" and r["after"] <= r["before"], r
+    assert c.post(f"/api/docs/{i}/compress", headers=h, json={"level": "nope"}).status_code == 400
 
     r = c.post(f"/api/docs/{i}/split", headers=h, json={"ranges": "1-2,3"})
     z = zipfile.ZipFile(io.BytesIO(r.content))
@@ -93,6 +180,9 @@ def test_flow():
     assert c.post("/api/docs", headers=h, files={"file": ("x.pdf", b"garbage")}).status_code == 400
     r = c.post(f"/api/docs/{i}/ocr", headers=h, json={})
     assert r.status_code in (200, 501)
+    if r.status_code == 200:
+        wait_job(h, r.json())
+    assert c.post(f"/api/docs/{i}/ocr", headers=h, json={"pages": "1-x"}).status_code in (400, 501)
 
     actions = {a["action"] for a in c.get("/api/audit", headers=h).json()}
     assert {"upload", "edit_text", "annotate", "redact", "compress", "split", "merge", "login", "login_failed"} <= actions

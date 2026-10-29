@@ -45,8 +45,11 @@ export default function Viewer({ doc, mode, act, zoom, setZoom, hits = [], curHi
         const idx = kids.findIndex((k) => k.offsetTop - el.offsetTop + k.offsetHeight > mid);
         if (idx >= 0 && idx !== page) setPage(idx);
       }}>
-        {doc.pages.map((pg, i) => (
-          <PageView key={i} doc={doc} i={i} pg={pg} zoom={zoom} mode={mode} act={act} near={Math.abs(i - page) <= 2}
+        {doc.pages.map((pg, i) => Math.abs(i - page) > 3 ? (
+          // far-away pages are empty boxes of the right size: a 900-page file costs almost nothing to scroll or re-render
+          <div key={i} className="page ph" id={"pg" + i} style={{ width: pg.w * zoom, height: pg.h * zoom }} />
+        ) : (
+          <PageView key={i} doc={doc} i={i} pg={pg} zoom={zoom} mode={mode} act={act} near={true}
             hits={hits.filter((h) => h.page === i)} curHit={curHit} selectable={selectable} sel={sel} setSel={setSel} showLines={showLines} askText={askText}
             fillUI={fillUI} fieldBoxes={fieldBoxes} fieldObjs={fieldObjs} onPlace={onPlace} onRect={onRect} ghost={ghost} />
         ))}
@@ -291,7 +294,7 @@ function PageView({ doc, i, pg, zoom, mode, act, near, hits, curHit, selectable,
     act("Updating text…", () => api.editText(doc.id, { page: i, bbox: e.bbox, text: e.text, size: e.size, color: e.color }));
   };
 
-  const cursor = mode === "select" || mode === "text" ? "text" : mode === "none" ? "default" : "crosshair";
+  const cursor = mode === "select" || mode === "text" ? "text" : mode === "none" || mode === "view" ? "default" : "crosshair";
   const pageFields = fillUI ? fillUI.fields.filter((f) => f.page === i) : [];
   const boxes = fieldBoxes ? fieldBoxes.filter((f) => f.page === i) : [];
   const box = (r) => ({ left: r[0] * zoom, top: r[1] * zoom, width: (r[2] - r[0]) * zoom, height: (r[3] - r[1]) * zoom });

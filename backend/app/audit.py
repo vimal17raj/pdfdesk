@@ -8,7 +8,7 @@ _lock = threading.Lock()
 
 
 def _conn():
-    c = sqlite3.connect(DB_PATH)
+    c = sqlite3.connect(DB_PATH, timeout=15)
     c.execute(
         "CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, "
         "user TEXT, action TEXT, doc_id TEXT, detail TEXT, ip TEXT)"

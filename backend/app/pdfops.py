@@ -1,13 +1,15 @@
 import base64
 import difflib
 import io
+import os
 import re
 import secrets
 import shutil
 import subprocess
-import tempfile
+import time
 import zipfile
 from collections import Counter
+from contextvars import ContextVar
 from datetime import date
 from pathlib import Path
 
@@ -18,9 +20,17 @@ from . import config
 
 
 # ---------------------------------------------------------------- basics
-def _open(data: bytes) -> fitz.Document:
+# When set, edit functions modify the document they were given in place and return None; the caller
+# (store.edit) then saves only the changes. Otherwise they work on bytes and return the new file's bytes.
+INPLACE: ContextVar[bool] = ContextVar("pdfdesk_inplace", default=False)
+
+
+def _open(data) -> fitz.Document:
+    """Accepts an already-open Document (used as is), a file path (opened lazily from disk) or PDF bytes."""
+    if isinstance(data, fitz.Document):
+        return data
     try:
-        doc = fitz.open(stream=data, filetype="pdf")
+        doc = fitz.open(str(data)) if isinstance(data, (str, Path)) else fitz.open(stream=data, filetype="pdf")
     except Exception:
         raise HTTPException(400, "Not a valid PDF file")
     if doc.needs_pass:
@@ -28,7 +38,15 @@ def _open(data: bytes) -> fitz.Document:
     return doc
 
 
-def _out(doc: fitz.Document, **kw) -> bytes:
+def _release(doc: fitz.Document):
+    """Close a document we opened ourselves, but never the shared, cached one."""
+    if not getattr(doc, "_pd_shared", False):
+        doc.close()
+
+
+def _out(doc: fitz.Document, **kw):
+    if INPLACE.get():
+        return None
     # garbage=1 drops unused objects but keeps object numbers stable, so a selected annotation keeps its id across edits
     return doc.tobytes(garbage=1, deflate=True, **kw)
 
@@ -78,18 +96,19 @@ def validate(data: bytes) -> int:
     return n
 
 
-def render(data: bytes, page: int, zoom: float) -> bytes:
+def render(data, page: int, zoom: float) -> bytes:
+    """JPEG is several times faster to encode and smaller on the wire than PNG; fine for on-screen pages."""
     doc = _open(data)
     pix = _page(doc, page).get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-    out = pix.tobytes("png")
-    doc.close()
+    out = pix.tobytes("jpeg", jpg_quality=82)
+    _release(doc)
     return out
 
 
-def page_sizes(data: bytes) -> list[dict]:
+def page_sizes(data) -> list[dict]:
     doc = _open(data)
-    out = [{"w": p.rect.width, "h": p.rect.height, "rotation": p.rotation} for p in doc]
-    doc.close()
+    out = [{"w": p.rect.width, "h": p.rect.height, "rotation": p.rotation} for p in (doc[i] for i in range(doc.page_count))]
+    _release(doc)
     return out
 
 
@@ -123,7 +142,7 @@ def text_lines(data: bytes, page: int) -> list[dict]:
                     "font": spans[0]["font"],
                 }
             )
-    doc.close()
+    _release(doc)
     return lines
 
 
@@ -209,7 +228,7 @@ def list_annots(data: bytes, page: int) -> list[dict]:
         for an in pg.annots() or []
         if an.type[1] not in _HIDDEN_ANNOTS
     ]
-    doc.close()
+    _release(doc)
     return out
 
 
@@ -223,7 +242,7 @@ def all_comments(data: bytes) -> list[dict]:
                 continue
             out.append({"page": i, "xref": an.xref, "type": t, "text": an.info.get("content", ""),
                         "author": an.info.get("title", ""), "rect": _to_view(pg, an.rect)})
-    doc.close()
+    _release(doc)
     return out
 
 
@@ -323,60 +342,119 @@ def split(data: bytes, groups: list[list[int]], stem: str) -> bytes:
 _LEVELS = {"low": (200, 150, 85), "medium": (150, 110, 70), "high": (120, 80, 50)}
 
 
-def compress(data: bytes, level: str) -> bytes:
+def check_level(level: str):
     if level not in _LEVELS:
         raise HTTPException(400, "level must be low, medium or high")
-    doc = _open(data)
+
+
+def compress_file(src, dst, level: str) -> None:
+    """Long-running: called from a background job. Reads src from disk, writes the smaller copy to dst."""
+    check_level(level)
+    doc = _open(src)
     thr, tgt, q = _LEVELS[level]
     try:
         doc.rewrite_images(dpi_threshold=thr, dpi_target=tgt, quality=q)
     except Exception:
         pass  # older PyMuPDF / odd images: structural compression below still applies
-    out = doc.tobytes(garbage=4, deflate=True, deflate_images=True, deflate_fonts=True, clean=True)
+    doc.save(str(dst), garbage=4, deflate=True, deflate_images=True, deflate_fonts=True, clean=True)
     doc.close()
-    return out if len(out) < len(data) else data
 
 
 def ocr_available() -> bool:
     return shutil.which("ocrmypdf") is not None and shutil.which("tesseract") is not None
 
 
-def ocr(data: bytes, langs: str | None = None, force: bool = False, deskew: bool = True) -> bytes:
-    """Scanned PDF -> searchable PDF using OCRmyPDF (Tesseract). Pages that already have text are skipped."""
+class Cancelled(Exception):
+    pass
+
+
+def _kill_tree(p: subprocess.Popen):
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"], capture_output=True)
+        else:
+            import signal
+            os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+            try:
+                p.wait(10)
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        pass
+    try:
+        p.wait(15)
+    except subprocess.TimeoutExpired:
+        p.kill()
+
+
+def check_ocr_args(langs: str | None, pages: str | None) -> tuple[str, str | None]:
     if not ocr_available():
         raise HTTPException(501, "OCR engine (ocrmypdf + tesseract) is not installed on the server")
     langs = (langs or config.OCR_LANGS).strip()
-    if not all(c.isalnum() or c in "+_" for c in langs):
+    if not langs or not all(c.isalnum() or c in "+_" for c in langs):
         raise HTTPException(400, "Bad language code")
-    with tempfile.TemporaryDirectory() as t:
-        src, dst = Path(t, "in.pdf"), Path(t, "out.pdf")
-        src.write_bytes(data)
-        cmd = ["ocrmypdf", "-l", langs, "--output-type", "pdf", "--optimize", "1"]
-        cmd += ["--force-ocr"] if force else ["--skip-text"]
-        if deskew:
-            cmd += ["--deskew"]
-        cmd += [str(src), str(dst)]
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-        if p.returncode != 0 or not dst.exists():
-            raise HTTPException(500, "OCR failed: " + (p.stderr or p.stdout)[-400:])
-        return dst.read_bytes()
+    pages = (pages or "").strip().replace(" ", "") or None
+    if pages and not re.fullmatch(r"\d+(-\d+)?(,\d+(-\d+)?)*", pages):
+        raise HTTPException(400, "Pages must look like 1-50 or 1,3,7-9")
+    return langs, pages
+
+
+def ocr_file(src, dst, langs: str, force: bool, deskew: bool, pages: str | None, cancelled, log_path) -> None:
+    """Scanned PDF -> searchable PDF using OCRmyPDF (Tesseract). Runs as a job; polls `cancelled()` so it can be stopped.
+    Pages that already have text are skipped unless `force`."""
+    cmd = ["ocrmypdf", "-l", langs, "--output-type", "pdf", "--optimize", "1", "--jobs", str(config.OCR_JOBS)]
+    cmd += ["--force-ocr"] if force else ["--skip-text"]
+    if deskew:
+        cmd += ["--deskew"]
+    if pages:
+        cmd += ["--pages", pages]
+    cmd += [str(src), str(dst)]
+    env = {**os.environ, "TMPDIR": str(config.TMP_DIR), "TEMP": str(config.TMP_DIR), "TMP": str(config.TMP_DIR)}
+    with open(log_path, "wb") as lf:
+        # own process group, so cancelling stops OCRmyPDF *and* the Tesseract/Ghostscript workers it spawned
+        p = subprocess.Popen(cmd, stdout=lf, stderr=lf, env=env, **({} if os.name == "nt" else {"start_new_session": True}))
+        while p.poll() is None:
+            if cancelled():
+                _kill_tree(p)
+                raise Cancelled()
+            time.sleep(1)
+    if p.returncode != 0 or not Path(dst).exists():
+        tail = Path(log_path).read_text(errors="replace")[-400:]
+        raise HTTPException(500, "OCR failed: " + tail)
+
+
+def ocr_progress(log_path) -> int | None:
+    """Best effort: the last 'NN%' OCRmyPDF printed to its log."""
+    try:
+        m = re.findall(r"(\d{1,3})%", Path(log_path).read_text(errors="replace")[-4000:])
+        return min(100, int(m[-1])) if m else None
+    except Exception:
+        return None
 
 
 def outline(data: bytes) -> list[dict]:
     doc = _open(data)
     out = [{"level": lvl, "title": t, "page": max(0, p - 1)} for lvl, t, p in doc.get_toc(simple=True) if p > 0]
-    doc.close()
+    _release(doc)
     return out
 
 
 # ---------------------------------------------------------------- search / export
-def search_text(data: bytes, query: str) -> list[dict]:
+SEARCH_LIMIT = 2000
+
+
+def search_text(data, query: str) -> list[dict]:
+    """Stops at SEARCH_LIMIT matches so a common word in a 900-page file doesn't flood the browser."""
     doc = _open(data)
     hits = []
-    for i, pg in enumerate(doc):
+    for i in range(doc.page_count):
+        pg = doc[i]
         for r in pg.search_for(query):
             hits.append({"page": i, "rect": _to_view(pg, r)})
-    doc.close()
+        if len(hits) >= SEARCH_LIMIT:
+            hits = hits[:SEARCH_LIMIT]
+            break
+    _release(doc)
     return hits
 
 
@@ -493,10 +571,14 @@ _WTYPES = {
 }
 
 
-def list_fields(data: bytes) -> list[dict]:
+def list_fields(data) -> list[dict]:
     doc = _open(data)
     out = []
-    for i, pg in enumerate(doc):
+    if not doc.is_form_pdf:  # no form at all: skip scanning every page
+        _release(doc)
+        return out
+    for i in range(doc.page_count):
+        pg = doc[i]
         for w in pg.widgets() or []:
             kind = w.field_type_string
             val = w.field_value
@@ -504,7 +586,7 @@ def list_fields(data: bytes) -> list[dict]:
                 val = val not in (False, "Off", "", None, 0)
             out.append({"page": i, "name": w.field_name, "type": kind, "rect": _to_view(pg, w.rect),
                         "value": val, "choices": list(w.choice_values or []), "readonly": bool(w.field_flags & 1)})
-    doc.close()
+    _release(doc)
     return out
 
 
