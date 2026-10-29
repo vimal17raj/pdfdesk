@@ -57,7 +57,10 @@ function Shell({ me, reloadMe, onLogout }) {
   const [toast, setToast] = useState(null);
   const [dialog, setDialog] = useState(null); // recent | share | props
   const [recent, setRecent] = useState([]);
-  const [find, setFind] = useState(null); // {q}
+  const [sq, setSq] = useState(""); // search box text
+  const [searched, setSearched] = useState(""); // the text the current results are for
+  const [searching, setSearching] = useState(false);
+  const [findTick, setFindTick] = useState(0); // bumped to open the Search panel on the right
   const [hits, setHits] = useState([]);
   const [hitIdx, setHitIdx] = useState(0);
   const [pending, setPending] = useState(null); // pasted content waiting to be placed
@@ -93,7 +96,7 @@ function Shell({ me, reloadMe, onLogout }) {
   const openDoc = async (id, toolId) => {
     await load(id);
     handle.current = null;
-    setHits([]);
+    setHits([]); setSq(""); setSearched("");
     if (toolId) setTool(toolId);
     else if (!TOOLS.find((t) => t.id === tool)?.needsDoc) setTool("view"); // open for viewing first; pick a tool later
   };
@@ -169,7 +172,7 @@ function Shell({ me, reloadMe, onLogout }) {
       document.body.appendChild(f);
     });
 
-  const closeDoc = () => { setDoc(null); setHits([]); setFind(null); handle.current = null; history.replaceState(null, "", location.pathname); };
+  const closeDoc = () => { setDoc(null); setHits([]); setSq(""); setSearched(""); handle.current = null; history.replaceState(null, "", location.pathname); };
 
   // ---------- Edit menu actions ----------
   const undo = () => doc && doc.version > 1 && act("Undo…", () => api.undo(doc.id));
@@ -232,7 +235,11 @@ function Shell({ me, reloadMe, onLogout }) {
       act("Pasting…", () => api.annotate(doc.id, { page: i, type: "text", rect: [x, y, x + p.w + 20, y + 22], text: p.text, size: 12 }));
   };
   const pageOp = (op, extra = {}) => act("Updating pages…", () => api.pages(doc.id, { op, pages: [curPage()], ...extra }));
-  const startFind = () => { if (!doc) return; setFind({ q: "" }); setTimeout(() => document.getElementById("findbox")?.focus(), 30); };
+  const startFind = () => {
+    if (!doc) return;
+    if (["organize", "create", "combine", "compare", "audit", "users"].includes(tool)) setTool("view"); // screens without a page viewer
+    setFindTick((t) => t + 1);
+  };
 
   useEffect(() => {
     const k = (e) => {
@@ -265,13 +272,21 @@ function Shell({ me, reloadMe, onLogout }) {
     setTimeout(() => document.getElementById("hit" + i)?.scrollIntoView({ behavior: "smooth", block: "center" }), 350);
   };
   const doFind = async (q) => {
-    if (!q.trim()) return setHits([]);
-    const h = (await api.search(doc.id, q).catch((e) => (say(e.message, true), []))).map((x, i) => ({ ...x, gi: i }));
-    setHits(h);
-    setFind((f) => ({ ...f, done: q }));
-    if (h.length) showHit(0, h);
-    else say("No matches");
+    if (!q.trim()) return clearFind();
+    setSearching(true);
+    try {
+      const h = (await api.search(doc.id, q)).map((x, i) => ({ ...x, gi: i }));
+      setHits(h);
+      setSearched(q);
+      setHitIdx(0);
+      if (h.length) showHit(0, h);
+    } catch (e) {
+      say(e.message, true);
+    } finally {
+      setSearching(false);
+    }
   };
+  const clearFind = () => { setHits([]); setSq(""); setSearched(""); setHitIdx(0); };
   const stepHit = (d) => {
     if (!hits.length) return;
     showHit((hitIdx + d + hits.length) % hits.length);
@@ -337,7 +352,8 @@ function Shell({ me, reloadMe, onLogout }) {
     ],
   };
 
-  const ctx = { me, doc, act, run, say, load, openDoc, zoom, setZoom, hits, hitIdx, setHits, setTool, openFile, openPicker, pending, placePending, tool };
+  const search = { q: sq, setQ: setSq, searched, searching, hits, hitIdx, doFind, stepHit, showHit, clear: clearFind, tick: findTick };
+  const ctx = { me, doc, act, run, say, load, openDoc, zoom, setZoom, hits, hitIdx, setHits, setTool, openFile, openPicker, pending, placePending, tool, search };
   const cur = TOOLS.find((t) => t.id === tool);
 
   return (
@@ -360,22 +376,6 @@ function Shell({ me, reloadMe, onLogout }) {
         {me.role === "admin" && <button className={tool === "audit" ? "active" : ""} onClick={() => setTool("audit")}>Audit log</button>}
         <span className="muted" title={`Signed in as ${me.user} (${me.role})`}>{me.user} · {me.role}</span>
       </header>
-      {find && doc && (
-        <div className="findbar">
-          <input id="findbox" placeholder="Find in this PDF" value={find.q} onChange={(e) => setFind({ q: e.target.value })}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                if (find.done === find.q && hits.length) stepHit(e.shiftKey ? -1 : 1);
-                else doFind(find.q);
-              }
-              if (e.key === "Escape") { setFind(null); setHits([]); }
-            }} />
-          <button onClick={() => (find.done === find.q ? stepHit(1) : doFind(find.q))}>{find.done === find.q && hits.length ? "Next ›" : "Find"}</button>
-          <button title="Previous match (Shift+Enter)" disabled={hits.length < 2} onClick={() => stepHit(-1)}>‹ Previous</button>
-          <span className="muted">{hits.length ? `${hitIdx + 1} of ${hits.length}${hits.length >= 2000 ? "+ (showing the first 2000)" : ""}` : find.done === find.q && find.q ? "No matches" : ""}</span>
-          <button onClick={() => { setFind(null); setHits([]); }}>✕</button>
-        </div>
-      )}
       {pending && <div className="findbar pastebar">Click on the page to place the pasted {pending.kind}. <button onClick={() => setPending(null)}>Cancel</button></div>}
       <div className="main">
         <section className="stage">

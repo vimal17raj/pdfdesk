@@ -135,7 +135,7 @@ function Workspace({ tool, ctx }) {
   return (
     <div className="work">
       <Viewer doc={doc} mode={mode} act={act} zoom={zoom} setZoom={setZoom} hits={hits} curHit={ctx.hitIdx} showLines={showLines}
-        askText={askText} fillUI={fillUI} fieldBoxes={fieldBoxes} fieldObjs={fieldObjs} onPlace={onPlace} onRect={onRect} ghost={ghost} ctx={{ setTool: ctx.setTool, tool }} />
+        askText={askText} fillUI={fillUI} fieldBoxes={fieldBoxes} fieldObjs={fieldObjs} onPlace={onPlace} onRect={onRect} ghost={ghost} ctx={{ setTool: ctx.setTool, tool, search: ctx.search }} />
       {!sideOpen && id !== "view" && <button className="sidetab" title="Show tool options" onClick={() => setSideOpen(true)}>◂ {tool.label}</button>}
       {sideOpen && id !== "view" && <aside className="side">
         <button className="sideclose" title="Close this panel" onClick={() => setSideOpen(false)}>✕</button>

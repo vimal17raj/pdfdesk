@@ -449,8 +449,22 @@ def search_text(data, query: str) -> list[dict]:
     hits = []
     for i in range(doc.page_count):
         pg = doc[i]
-        for r in pg.search_for(query):
-            hits.append({"page": i, "rect": _to_view(pg, r)})
+        found = pg.search_for(query)
+        words, lines = [], {}
+        if found:
+            words = pg.get_text("words", textpage=pg.get_textpage())  # (x0,y0,x1,y1,text,block,line,word_no)
+            for w in words:
+                lines.setdefault((w[5], w[6]), []).append(w)
+        for r in found:
+            # a few words either side of the match on its own line, so the list shows *where* it is, not just the page
+            cx, cy = (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2
+            hw = next((w for w in words if w[0] - 1 <= cx <= w[2] + 1 and w[1] - 1 <= cy <= w[3] + 1), None)
+            snippet = ""
+            if hw:
+                lw = sorted(lines[(hw[5], hw[6])], key=lambda w: w[7])
+                k = lw.index(hw)
+                snippet = " ".join(w[4] for w in lw[max(0, k - 7): k + 10])[:200]
+            hits.append({"page": i, "rect": _to_view(pg, r), "snippet": snippet})
         if len(hits) >= SEARCH_LIMIT:
             hits = hits[:SEARCH_LIMIT]
             break

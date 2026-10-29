@@ -24,6 +24,13 @@ export default function Viewer({ doc, mode, act, zoom, setZoom, hits = [], curHi
   };
   useEffect(() => { if (page >= n) setPage(Math.max(0, n - 1)); }, [n, page]);
   useEffect(() => { setPin(String(page + 1)); }, [page]);
+  // Ctrl+F / the 🔍 button / Edit → Find open the Search panel on the right
+  const tick = ctx?.search?.tick;
+  useEffect(() => {
+    if (!tick) return;
+    setPanel("search");
+    setTimeout(() => { const el = document.getElementById("searchbox"); el?.focus(); el?.select(); }, 60);
+  }, [tick]);
 
   const fit = (kind) => {
     setFitMenu(false);
@@ -54,10 +61,11 @@ export default function Viewer({ doc, mode, act, zoom, setZoom, hits = [], curHi
             fillUI={fillUI} fieldBoxes={fieldBoxes} fieldObjs={fieldObjs} onPlace={onPlace} onRect={onRect} ghost={ghost} />
         ))}
       </div>
-      {panel && <RailPanel kind={panel} doc={doc} page={page} go={go} close={() => setPanel(null)} />}
+      {panel && <RailPanel kind={panel} doc={doc} page={page} go={go} close={() => setPanel(null)} search={ctx?.search} />}
       <div className="rail">
         <div className="rtop">
           {rail("summary", "✦", "Generative summary (AI assistant)", () => ctx?.setTool("summary"))}
+          {rail("search", "🔍", "Search (Ctrl+F)", () => toggle("search"))}
           {rail("comments", "💬", "Comments", () => toggle("comments"))}
           {rail("bookmarks", "🔖", "Bookmarks", () => toggle("bookmarks"))}
           {rail("pages", "🗐", "Page thumbnails", () => toggle("pages"))}
@@ -115,18 +123,72 @@ function ObjToolbar({ o, box, patch, remove, edit }) {
   );
 }
 
-function RailPanel({ kind, doc, page, go, close }) {
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function Marked({ text, term }) {
+  if (!term) return text;
+  return text.split(new RegExp(`(${escRe(term)})`, "i")).map((t, i) => (i % 2 ? <mark key={i}>{t}</mark> : t));
+}
+
+function SearchPanel({ s, doc }) {
+  const list = useRef();
+  useEffect(() => { list.current?.querySelector(".sr.cur")?.scrollIntoView({ block: "nearest" }); }, [s.hitIdx, s.hits]);
+  const fresh = s.searched === s.q.trim() || s.searched === s.q;
+  const pages = new Set(s.hits.map((h) => h.page)).size;
+  const capped = s.hits.length >= 2000;
+  const where = (h) => {
+    const p = doc.pages[h.page];
+    const f = (h.rect[1] + h.rect[3]) / 2 / p.h;
+    return f < 0.33 ? "top of page" : f < 0.66 ? "middle of page" : "bottom of page";
+  };
+  const go = () => (fresh && s.hits.length ? null : s.doFind(s.q));
+  return (
+    <div className="spanel">
+      <div className="srow">
+        <input id="searchbox" autoFocus placeholder="Search in this PDF" value={s.q} onChange={(e) => s.setQ(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { if (fresh && s.hits.length) s.stepHit(e.shiftKey ? -1 : 1); else s.doFind(s.q); }
+            if (e.key === "Escape") s.clear();
+          }} />
+        <button className="primary" title="Search" onClick={() => s.doFind(s.q)} disabled={!s.q.trim() || s.searching}>Go</button>
+      </div>
+      <div className="srow nav">
+        <button title="Previous match (Shift+Enter)" disabled={s.hits.length < 2} onClick={() => s.stepHit(-1)}>▲</button>
+        <button title="Next match (Enter)" disabled={s.hits.length < 2} onClick={() => s.stepHit(1)}>▼</button>
+        <span className="muted grow">
+          {s.searching ? "Searching…" : s.hits.length ? `${s.hitIdx + 1} of ${s.hits.length}${capped ? "+" : ""} · ${pages} page${pages > 1 ? "s" : ""}`
+            : s.searched && fresh ? "No matches" : ""}
+        </span>
+        {(s.hits.length > 0 || s.q) && <button title="Clear search" onClick={s.clear}>✕</button>}
+      </div>
+      {capped && <div className="note warn small">Showing the first 2000 matches. Use a longer phrase to narrow it.</div>}
+      <div className="slist" ref={list}>
+        {s.hits.map((h, i) => (
+          <div key={h.gi} className={"sr" + (i === s.hitIdx ? " cur" : "")} onClick={() => s.showHit(i)} title="Jump to this match">
+            <div><b>Page {h.page + 1}</b> <span className="muted">· {where(h)}</span></div>
+            <div className="snip">…<Marked text={h.snippet || ""} term={s.searched} />…</div>
+          </div>
+        ))}
+        {!s.hits.length && !s.searching && <p className="muted pad">Type a word or phrase and press Enter. Results are listed here — click one to jump to it.{" "}
+          {doc.pages.length > 1 ? "Scanned pages need OCR before they can be searched." : ""}</p>}
+      </div>
+    </div>
+  );
+}
+
+function RailPanel({ kind, doc, page, go, close, search }) {
   const [items, setItems] = useState(null);
   useEffect(() => {
     setItems(null);
     if (kind === "bookmarks") api.outline(doc.id).then(setItems).catch(() => setItems([]));
     if (kind === "comments") api.comments(doc.id).then(setItems).catch(() => setItems([]));
   }, [kind, doc.id, doc.version]);
-  const title = { pages: "Pages", bookmarks: "Bookmarks", comments: "Comments" }[kind];
+  const title = { pages: "Pages", bookmarks: "Bookmarks", comments: "Comments", search: "Search" }[kind];
   return (
-    <div className="rpanel">
+    <div className={"rpanel" + (kind === "search" ? " wide" : "")}>
       <div className="rphead"><b>{title}</b><button onClick={close}>✕</button></div>
-      <div className="rpbody">
+      {kind === "search" && search && <SearchPanel s={search} doc={doc} />}
+      {kind !== "search" && <div className="rpbody">
         {kind === "pages" && doc.pages.map((_, i) => (
           <div key={i} className={"rthumb" + (i === page ? " cur" : "")} onClick={() => go(i)}>
             <img loading="lazy" src={api.imgUrl(doc.id, i, 0.25, doc.version)} alt="" /><span>{i + 1}</span>
@@ -143,7 +205,7 @@ function RailPanel({ kind, doc, page, go, close }) {
               <span>{c.text || <i className="muted">(no text)</i>}</span>
             </div>
           )))}
-      </div>
+      </div>}
     </div>
   );
 }

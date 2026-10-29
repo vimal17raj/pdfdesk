@@ -58,6 +58,7 @@ def test_big_document():
 
     hits = c.get(f"/api/docs/{i}/search?q=unique59", headers=h).json()
     assert {x["page"] for x in hits} >= {59, 590}
+    assert all("unique59" in x["snippet"] for x in hits if x["page"] == 59), hits[:2]
 
     # an edit appends to a copy: the new version is only slightly larger than the old one, and is much faster than a rewrite
     t = time.time()
