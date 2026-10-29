@@ -1,6 +1,7 @@
 import base64
 import difflib
 import io
+import json
 import os
 import re
 import secrets
@@ -435,17 +436,29 @@ def check_ocr_args(langs: str | None, pages: str | None) -> tuple[str, str | Non
 def ocr_file(src, dst, langs: str, force: bool, deskew: bool, pages: str | None, cancelled, log_path) -> None:
     """Scanned PDF -> searchable PDF using OCRmyPDF (Tesseract). Runs as a job; polls `cancelled()` so it can be stopped.
     Pages that already have text are skipped unless `force`."""
-    cmd = ["ocrmypdf", "-l", langs, "--output-type", "pdf", "--optimize", "1", "--jobs", str(config.OCR_JOBS)]
+    cmd = ["ocrmypdf", "-l", langs, "--output-type", "pdf", "--optimize", "0", "--jobs", str(config.OCR_JOBS)]
+    progress_plugin = Path(os.getenv("PDFDESK_OCR_PROGRESS_PLUGIN", Path(__file__).with_name("ocr_progress_plugin.py")))
+    if progress_plugin.is_file():
+        cmd += ["--plugin", str(progress_plugin)]
     cmd += ["--force-ocr"] if force else ["--skip-text"]
     if deskew:
         cmd += ["--deskew"]
     if pages:
         cmd += ["--pages", pages]
     cmd += [str(src), str(dst)]
-    env = {**os.environ, "TMPDIR": str(config.TMP_DIR), "TEMP": str(config.TMP_DIR), "TMP": str(config.TMP_DIR)}
+    progress_file = str(Path(log_path).with_suffix(".progress.json"))
+    try:
+        progress_doc = fitz.open(str(src), filetype="pdf")
+        total_pages = progress_doc.page_count
+        progress_doc.close()
+    except Exception:
+        total_pages = 0
+    env = {**os.environ, "TMPDIR": str(config.TMP_DIR), "TEMP": str(config.TMP_DIR), "TMP": str(config.TMP_DIR),
+           "PDFDESK_OCR_PROGRESS_FILE": progress_file, "PDFDESK_OCR_TOTAL_PAGES": str(total_pages)}
     with open(log_path, "wb") as lf:
         # own process group, so cancelling stops OCRmyPDF *and* the Tesseract/Ghostscript workers it spawned
-        p = subprocess.Popen(cmd, stdout=lf, stderr=lf, env=env, **({} if os.name == "nt" else {"start_new_session": True}))
+        popen_options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
+        p = subprocess.Popen(cmd, stdout=lf, stderr=lf, env=env, **popen_options)
         while p.poll() is None:
             if cancelled():
                 _kill_tree(p)
@@ -463,6 +476,28 @@ def ocr_progress(log_path) -> int | None:
         return min(100, int(m[-1])) if m else None
     except Exception:
         return None
+
+
+def ocr_progress_detail(log_path) -> dict:
+    """Read machine-readable phase and page completion emitted by the OCRmyPDF plugin."""
+    progress_path = Path(log_path).with_suffix(".progress.json")
+    try:
+        state = json.loads(progress_path.read_text(encoding="utf-8"))
+        total = state.get("total")
+        completed = state.get("completed", 0)
+        if "completed" in state and isinstance(total, (int, float)) and total > 0:
+            state["progress"] = min(100, max(0, round(completed / total * 100)))
+        else:
+            state["progress"] = None
+        if state.get("stage", "").strip().lower() == "ocr" and state.get("active_page"):
+            state["progress_label"] = f"OCR scanning page {int(state['active_page'])} of {int(total or 0)}"
+        elif state.get("stage", "").strip().lower() == "ocr" and state.get("last_page"):
+            state["progress_label"] = f"OCR finished page {int(state['last_page'])}; preparing the next page…"
+        else:
+            state["progress_label"] = state.get("stage") or "Preparing OCR…"
+        return state
+    except (OSError, ValueError, TypeError):
+        return {}
 
 
 def outline(data: bytes) -> list[dict]:

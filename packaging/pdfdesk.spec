@@ -16,6 +16,7 @@ for pkg in ("ocrmypdf", "pikepdf", "pymupdf", "pluggy", "img2pdf", "docx", "mult
         pass
 hidden += collect_submodules("uvicorn") + collect_submodules("app") + ["jwt", "httpx", "h11", "anyio", "email_validator"]
 datas += [(str(ROOT / "frontend" / "dist"), "web")]
+datas += [(str(BACKEND / "app" / "ocr_progress_plugin.py"), ".")]
 
 EXCLUDES = ["tkinter", "matplotlib", "numpy.tests", "pytest", "IPython"]
 

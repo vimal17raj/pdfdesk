@@ -371,6 +371,7 @@ function JobStatus({ j, cancel, what }) {
       <div className="note">
         <div className="row"><div className="spin small" /> <b>{what} running…</b> <span className="muted">{j.starting ? "starting" : mmss(j.elapsed)}</span></div>
         {j.progress != null && <div className="bar"><div style={{ width: j.progress + "%" }} /></div>}
+        {what === "OCR" && <div className="muted">{j.progress_label || (j.progress != null ? `OCR progress: ${j.progress}%` : "Preparing OCR…")}</div>}
         <div className="muted">Large files can take several minutes. You can keep reading, but wait before editing this document.</div>
         <button onClick={cancel}>Cancel</button>
       </div>
@@ -383,7 +384,7 @@ function JobStatus({ j, cancel, what }) {
 
 function OcrPanel({ doc, act, ctx, say }) {
   const { me, openDoc, run } = ctx;
-  const [v, setV] = useState({ langs: me.ocr_langs, force: false, deskew: true, pages: "" });
+  const [v, setV] = useState({ langs: me.ocr_langs, force: false, deskew: false, pages: "" });
   const { job, start, cancel, running } = useJob(ctx, doc, say);
   const sc = useRef();
   const scan = (list) => run("Importing scans…", async () => {
@@ -396,9 +397,10 @@ function OcrPanel({ doc, act, ctx, say }) {
     <div className="stack">
       {!me.ocr && <div className="error">OCR engine is not installed on this server.</div>}
       <label>Languages<input value={v.langs} onChange={(e) => setV({ ...v, langs: e.target.value })} title="e.g. eng, eng+tam, eng+hin" /></label>
-      <label className="chk"><input type="checkbox" checked={v.deskew} onChange={(e) => setV({ ...v, deskew: e.target.checked })} /> Straighten crooked pages</label>
+      <label className="chk"><input type="checkbox" checked={v.deskew} onChange={(e) => setV({ ...v, deskew: e.target.checked })} /> Straighten crooked pages (slower)</label>
       <label className="chk"><input type="checkbox" checked={v.force} onChange={(e) => setV({ ...v, force: e.target.checked })} /> Re-OCR pages that already have text</label>
       <label>Pages (blank = all {doc.pages.length})<input value={v.pages} placeholder="e.g. 1-50 or 1,3,7-9" onChange={(e) => setV({ ...v, pages: e.target.value })} /></label>
+      <p className="muted">Fast OCR is selected by default. Straightening crooked pages takes longer; use Compress afterward if you also need a smaller file.</p>
       {doc.pages.length > 100 && !v.pages.trim() && <div className="note warn">{doc.pages.length} pages is a long job — roughly a few seconds per page. Try a page range first (e.g. 1-20) to check the result.</div>}
       <button className="primary" disabled={!me.ocr || running} onClick={() => start(() => api.ocr(doc.id, v))}>Run OCR</button>
       <JobStatus j={job} cancel={cancel} what="OCR" />

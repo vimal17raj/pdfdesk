@@ -94,6 +94,8 @@ def main():
     data.mkdir(parents=True, exist_ok=True)
     os.environ.update(PDFDESK_DESKTOP="1", PDFDESK_DATA=str(data), PDFDESK_STATIC=str(HERE / "web"),
                       PDFDESK_JWT_SECRET="desktop-only-" + str(os.getpid()))
+    if FROZEN:
+        os.environ["PDFDESK_OCR_PROGRESS_PLUGIN"] = str(HERE / "ocr_progress_plugin.py")
     os.environ["PATH"] = os.pathsep.join([str(EXE_DIR), *_tesseract_dirs(), os.environ.get("PATH", "")])
 
     import uvicorn

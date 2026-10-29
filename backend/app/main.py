@@ -599,7 +599,7 @@ def _job_result(doc_id: str, u: dict, tmp: Path, base_version: int, name: str, s
 class Ocr(BaseModel):
     langs: str | None = None
     force: bool = False
-    deskew: bool = True
+    deskew: bool = False
     pages: str | None = None  # e.g. "1-50" or "1,3,7-9"; empty = whole document
 
 
@@ -616,7 +616,7 @@ def run_ocr(doc_id: str, b: Ocr, u: dict = U):
             pdfops.ocr_file(path, tmp, langs, b.force, b.deskew, pages, cancelled, job["log"])
             return _job_result(doc_id, u, tmp, base, info["name"], "OCR", "ocr", f"langs={langs} pages={pages or 'all'}")
         finally:
-            for f in (tmp, Path(job["log"])):
+            for f in (tmp, Path(job["log"]), Path(job["log"]).with_suffix(".progress.json")):
                 try:
                     f.unlink(missing_ok=True)
                 except OSError:

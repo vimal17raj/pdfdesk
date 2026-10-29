@@ -55,7 +55,11 @@ def get(job_id: str, user: dict) -> dict:
                        finished=time.time())
             _write(job)
         elif job["kind"] == "ocr":
-            job["progress"] = pdfops.ocr_progress(job["log"])
+            detail = pdfops.ocr_progress_detail(job["log"])
+            if detail:
+                job.update(detail)
+            else:
+                job["progress"] = pdfops.ocr_progress(job["log"])
     return _public(job)
 
 
