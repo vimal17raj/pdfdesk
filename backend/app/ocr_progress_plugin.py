@@ -66,10 +66,11 @@ class PdfDeskTesseractEngine(TesseractOcrEngine):
 
 
 @hookimpl
-def get_ocr_engine(options):
-    if options is None or getattr(options, "ocr_engine", "auto") in ("auto", "tesseract"):
-        return PdfDeskTesseractEngine()
-    return None
+def get_ocr_engine():
+    # Keep this hook argument-free for compatibility with the older OCRmyPDF
+    # hook specification used by the Linux production image. This app only
+    # offers Tesseract, so no engine-selection option is needed here.
+    return PdfDeskTesseractEngine()
 
 
 @hookimpl
