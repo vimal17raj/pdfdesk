@@ -434,7 +434,8 @@ def check_ocr_args(langs: str | None, pages: str | None) -> tuple[str, str | Non
     return langs, pages
 
 
-def ocr_file(src, dst, langs: str, force: bool, deskew: bool, pages: str | None, cancelled, log_path) -> None:
+def ocr_file(src, dst, langs: str, force: bool, deskew: bool, pages: str | None, cancelled, log_path,
+             pagesegmode: int = 3) -> None:
     """Scanned PDF -> searchable PDF using OCRmyPDF (Tesseract). Runs as a job; polls `cancelled()` so it can be stopped.
     Pages that already have text are skipped unless `force`."""
     cmd = ["ocrmypdf", "-l", langs, "--output-type", "pdf", "--optimize", "0", "--jobs", str(config.OCR_JOBS)]
@@ -444,6 +445,8 @@ def ocr_file(src, dst, langs: str, force: bool, deskew: bool, pages: str | None,
     cmd += ["--force-ocr"] if force else ["--skip-text"]
     if deskew:
         cmd += ["--deskew"]
+    if pagesegmode != 3:
+        cmd += ["--tesseract-pagesegmode", str(pagesegmode)]
     if pages:
         cmd += ["--pages", pages]
     cmd += [str(src), str(dst)]
@@ -569,6 +572,81 @@ def _numeric_ocr_hits(page, query: str) -> list[tuple[fitz.Rect, str]]:
     return hits
 
 
+def _numeric_ocr_char_hits(page, query: str) -> list[tuple[fitz.Rect, str]]:
+    """Fallback for OCR layers that expose each digit as a separate character/span."""
+    if not re.fullmatch(r"[\d\s\-()./]+", query.strip()):
+        return []
+    target = re.sub(r"\D", "", query)
+    if len(target) < 3:
+        return []
+
+    confusables = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "|": "1",
+                                "S": "5", "s": "5", "B": "8", "Z": "2", "z": "2", "G": "6"})
+    rows = []
+    for block in page.get_text("rawdict").get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            chars = [ch for span in line.get("spans", []) for ch in span.get("chars", [])]
+            if not chars:
+                continue
+            y0, y1 = line["bbox"][1], line["bbox"][3]
+            center = (y0 + y1) / 2
+            row = next((r for r in rows if abs(r[0] - center) <= max(2.0, min(r[1] - r[2], y1 - y0) * 0.4)), None)
+            if row is None:
+                row = [center, y1, y0, []]
+                rows.append(row)
+            else:
+                row[1] = max(row[1], y1)
+                row[2] = min(row[2], y0)
+            row[3].extend(chars)
+
+    hits = []
+    for row in rows:
+        chars = sorted(row[3], key=lambda ch: (ch["bbox"][0], ch["bbox"][1]))
+        cluster = []
+        previous = None
+
+        def flush():
+            if not cluster:
+                return
+            joined = "".join(ch[0] for ch in cluster)
+            offset = joined.find(target)
+            while offset >= 0:
+                matched = [ch[1] for ch in cluster[offset:offset + len(target)]]
+                rect = fitz.Rect(min(b[0] for b in matched), min(b[1] for b in matched),
+                                 max(b[2] for b in matched), max(b[3] for b in matched))
+                snippet = "".join(ch.get("c", "") for ch in chars)[:200]
+                hits.append((rect, snippet))
+                offset = joined.find(target, offset + 1)
+
+        for ch in chars:
+            value = ch.get("c", "")
+            x0, y0, x1, y1 = ch["bbox"]
+            if value.isspace():
+                if previous is None or x0 - previous[2] > max(2.0, min(y1 - y0, previous[3] - previous[1]) * 2.0):
+                    flush()
+                    cluster.clear()
+                    previous = None
+                continue
+            normalized = value.translate(confusables)
+            if normalized not in "0123456789":
+                flush()
+                cluster.clear()
+                previous = None
+                continue
+            if previous is not None:
+                gap = x0 - previous[2]
+                max_gap = max(2.0, min(y1 - y0, previous[3] - previous[1]) * 2.0)
+                if gap > max_gap:
+                    flush()
+                    cluster.clear()
+            cluster.append((normalized, (x0, y0, x1, y1)))
+            previous = (x0, y0, x1, y1)
+        flush()
+    return hits
+
+
 def search_text(data, query: str, start: int = 0, stop: int | None = None) -> list[dict]:
     """Stops at SEARCH_LIMIT matches so a common word in a 900-page file doesn't flood the browser.
     start/stop let the caller search a huge file in slices, so other requests aren't blocked meanwhile."""
@@ -578,7 +656,10 @@ def search_text(data, query: str, start: int = 0, stop: int | None = None) -> li
         pg = doc[i]
         found = pg.search_for(query)
         if not found:
-            for rect, snippet in _numeric_ocr_hits(pg, query):
+            numeric_hits = _numeric_ocr_hits(pg, query)
+            if not numeric_hits:
+                numeric_hits = _numeric_ocr_char_hits(pg, query)
+            for rect, snippet in numeric_hits:
                 hits.append({"page": i, "rect": _to_view(pg, rect), "snippet": snippet})
             if len(hits) >= SEARCH_LIMIT:
                 hits = hits[:SEARCH_LIMIT]
