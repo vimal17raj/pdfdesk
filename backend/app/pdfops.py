@@ -127,10 +127,11 @@ def validate(data: bytes) -> int:
 def render(data, page: int, zoom: float) -> bytes:
     """JPEG is several times faster to encode and smaller on the wire than PNG; fine for on-screen pages."""
     doc = _open(data)
-    pix = _page(doc, page).get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-    out = pix.tobytes("jpeg", jpg_quality=82)
-    _release(doc)
-    return out
+    try:
+        pix = _page(doc, page).get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        return pix.tobytes("jpeg", jpg_quality=82)
+    finally:
+        _release(doc)
 
 
 def page_sizes(data) -> list[dict]:

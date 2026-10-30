@@ -103,7 +103,7 @@ export default function Viewer({ doc, mode, act, zoom, setZoom, hits = [], curHi
           // far-away pages are empty boxes of the right size: a 900-page file costs almost nothing to scroll or re-render
           <div key={i} className="page ph" id={"pg" + i} style={{ width: pg.w * zoom, height: pg.h * zoom }} />
         ) : (
-          <PageView key={i} doc={doc} i={i} pg={pg} zoom={zoom} mode={mode} act={act} near={true}
+          <PageView key={`${doc.id}-${i}`} doc={doc} i={i} pg={pg} zoom={zoom} mode={mode} act={act} near={true}
             hits={hits.filter((h) => h.page === i)} curHit={curHit} selectable={selectable} sel={sel} setSel={setSel} showLines={showLines} askText={askText}
             fillUI={fillUI} fieldBoxes={fieldBoxes} fieldObjs={fieldObjs} onPlace={onPlace} onRect={onRect} ghost={ghost} />
         ); })}
@@ -266,6 +266,8 @@ const TYPE_LABEL = { Stamp: "Stamp / image", FreeText: "Text", Square: "Box", Ci
 const hexToRgb = (h) => [1, 3, 5].map((k) => parseInt(h.slice(k, k + 2), 16) / 255);
 
 function PageView({ doc, i, pg, zoom, mode, act, near, hits, curHit, selectable, sel, setSel, showLines, askText, fillUI, fieldBoxes, fieldObjs, onPlace, onRect, ghost }) {
+  const [imageState, setImageState] = useState("loading");
+  const [imageAttempt, setImageAttempt] = useState(0);
   const [lines, setLines] = useState([]);
   const [annots, setAnnots] = useState([]);
   const [drag, setDrag] = useState(null);
@@ -276,6 +278,10 @@ function PageView({ doc, i, pg, zoom, mode, act, near, hits, curHit, selectable,
   const [oed, setOed] = useState(null); // inline editor for the selected object's text / field name
   const ref = useRef();
   const w = pg.w * zoom, h = pg.h * zoom;
+  const imageZoom = Math.min(2.5, zoom * 1.25).toFixed(2);
+  const imageUrl = `${api.imgUrl(doc.id, i, imageZoom, doc.rev)}&retry=${imageAttempt}`;
+
+  useEffect(() => { setImageState("loading"); }, [doc.id, doc.rev, i, imageZoom, imageAttempt]);
 
   useEffect(() => {
     if (!near) return;
@@ -411,7 +417,13 @@ function PageView({ doc, i, pg, zoom, mode, act, near, hits, curHit, selectable,
 
   return (
     <div className="page" id={"pg" + i} style={{ width: w, height: h }}>
-      {near ? <img src={api.imgUrl(doc.id, i, Math.min(3, zoom * 1.5).toFixed(2), doc.rev)} width={w} height={h} alt="" draggable={false} /> : <div className="ph" />}
+      {near && <>
+        <img loading="lazy" src={imageUrl} width={w} height={h} alt="" draggable={false}
+          onLoad={() => setImageState("loaded")} onError={() => setImageState("error")} />
+        {imageState === "loading" && <div className="page-status" aria-live="polite"><span className="spin small" />Rendering page {i + 1}…</div>}
+        {imageState === "error" && <div className="page-status page-error" role="alert">Could not render page {i + 1}. <button onClick={() => { setImageState("loading"); setImageAttempt((x) => x + 1); }}>Retry</button></div>}
+      </>}
+      {!near && <div className="ph" />}
       <div ref={ref} className="overlay" style={{ cursor }} onMouseDown={down} onMouseMove={move} onMouseUp={up}
         onMouseLeave={() => { setMouse(null); up(); }}>
         {showLines && lines.map((l, k) => (

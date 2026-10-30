@@ -98,6 +98,8 @@ nav.tools button:hover { background:var(--hover); } nav.tools button.active { ba
 
 .page { position:relative; flex:none; background:#fff; box-shadow:0 2px 10px #0003; }
 .page img, .ph { display:block; user-select:none; } .ph { width:100%; height:100%; }
+.page-status { position:absolute; inset:0; z-index:2; display:flex; align-items:center; justify-content:center; gap:8px; color:var(--muted); background:#fff9; pointer-events:none; }
+.page-status.page-error { flex-direction:column; color:var(--bad); background:#fffE; pointer-events:auto; }
 .overlay { position:absolute; inset:0; }
 .line { position:absolute; cursor:text; } .line:hover { background:#2f6df633; outline:1px solid var(--accent); }
 .hit { position:absolute; background:#ffd60055; outline:1px solid #e0a800; pointer-events:none; }
