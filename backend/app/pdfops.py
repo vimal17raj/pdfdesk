@@ -594,27 +594,6 @@ def _numeric_text_might_match(page, query: str) -> bool:
     return target in re.sub(r"\D", "", text.translate(confusables))
 
 
-def _numeric_text_near_match(page, query: str) -> bool:
-    """Find OCR lines close enough to justify a slower cheque-field re-read."""
-    target = re.sub(r"\D", "", query)
-    confusables = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "|": "1",
-                                "S": "5", "s": "5", "B": "8", "Z": "2", "z": "2", "G": "6"})
-    for line in page.get_text("text").splitlines():
-        digits = re.sub(r"\D", "", line.translate(confusables))
-        if abs(len(digits) - len(target)) > 2:
-            continue
-        if difflib.SequenceMatcher(None, target, digits).ratio() >= 0.72:
-            return True
-        # OCR may merge nearby printed amounts with the check number on one line.
-        # Compare target-sized windows so surrounding digits do not hide a near hit.
-        lo, hi = max(1, len(target) - 2), min(len(digits), len(target) + 2)
-        for size in range(lo, hi + 1):
-            for start in range(max(0, len(digits) - size + 1)):
-                if difflib.SequenceMatcher(None, target, digits[start:start + size]).ratio() >= 0.72:
-                    return True
-    return False
-
-
 def _cheque_crop_numeric_hits(page, query: str) -> list[tuple[fitz.Rect, str]]:
     """Re-OCR the cheque number box when noisy monochrome page OCR missed long IDs."""
     target = re.sub(r"\D", "", query)
@@ -691,7 +670,7 @@ def search_text(data, query: str, start: int = 0, stop: int | None = None) -> li
             if _numeric_text_might_match(pg, query):
                 for rect, snippet in _numeric_ocr_char_hits(pg.get_text("rawdict"), query):
                     page_hits.append({"page": i, "rect": _to_view(pg, rect), "snippet": snippet})
-            if not page_hits and _numeric_text_near_match(pg, query):
+            if not page_hits:
                 page_hits = [{"page": i, "rect": _to_view(pg, rect), "snippet": snippet}
                              for rect, snippet in _cheque_crop_numeric_hits(pg, query)]
             hits.extend(page_hits)
