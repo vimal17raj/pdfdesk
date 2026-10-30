@@ -512,65 +512,8 @@ def outline(data: bytes) -> list[dict]:
 SEARCH_LIMIT = 2000
 
 
-def _numeric_ocr_hits(page, query: str) -> list[tuple[fitz.Rect, str]]:
-    """Find numeric queries when OCR split digits into nearby words or confused O/I with 0/1."""
-    if not re.fullmatch(r"[\d\s\-()./]+", query.strip()):
-        return []
-    target = re.sub(r"\D", "", query)
-    if len(target) < 3:
-        return []
-
-    confusables = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "|": "1"})
-    by_line = {}
-    for word in page.get_text("words"):
-        by_line.setdefault((word[5], word[6]), []).append(word)
-
-    hits = []
-    for line_words in by_line.values():
-        line_words.sort(key=lambda word: word[7])
-        cluster = []
-        previous = None
-
-        def flush():
-            if not cluster:
-                return
-            digits, bounds = [], []
-            for word in cluster:
-                raw = re.sub(r"[^0-9OoIl|]", "", word[4])
-                normalized = raw.translate(confusables)
-                digits.append(normalized)
-                bounds.extend([(word[0], word[1], word[2], word[3])] * len(normalized))
-            joined = "".join(digits)
-            offset = joined.find(target)
-            while offset >= 0:
-                matched = bounds[offset:offset + len(target)]
-                rect = fitz.Rect(min(b[0] for b in matched), min(b[1] for b in matched),
-                                 max(b[2] for b in matched), max(b[3] for b in matched))
-                snippet = " ".join(word[4] for word in line_words)[:200]
-                hits.append((rect, snippet))
-                offset = joined.find(target, offset + 1)
-
-        for word in line_words:
-            raw = re.sub(r"[^0-9OoIl|]", "", word[4])
-            if not raw:
-                flush()
-                cluster.clear()
-                previous = None
-                continue
-            if previous is not None:
-                gap = word[0] - previous[2]
-                max_gap = max(2.0, min(word[3] - word[1], previous[3] - previous[1]) * 1.5)
-                if gap > max_gap:
-                    flush()
-                    cluster.clear()
-            cluster.append(word)
-            previous = word
-        flush()
-    return hits
-
-
-def _numeric_ocr_char_hits(page, query: str) -> list[tuple[fitz.Rect, str]]:
-    """Fallback for OCR layers that expose each digit as a separate character/span."""
+def _numeric_ocr_char_hits(rawdict: dict, query: str) -> list[tuple[fitz.Rect, str]]:
+    """Find numeric matches from one raw text extraction, including split OCR glyphs."""
     if not re.fullmatch(r"[\d\s\-()./]+", query.strip()):
         return []
     target = re.sub(r"\D", "", query)
@@ -580,7 +523,7 @@ def _numeric_ocr_char_hits(page, query: str) -> list[tuple[fitz.Rect, str]]:
     confusables = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "|": "1",
                                 "S": "5", "s": "5", "B": "8", "Z": "2", "z": "2", "G": "6"})
     rows = []
-    for block in page.get_text("rawdict").get("blocks", []):
+    for block in rawdict.get("blocks", []):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
@@ -649,18 +592,21 @@ def search_text(data, query: str, start: int = 0, stop: int | None = None) -> li
     start/stop let the caller search a huge file in slices, so other requests aren't blocked meanwhile."""
     doc = _open(data)
     hits = []
+    numeric_query = bool(re.fullmatch(r"[\d\s\-()./]+", query.strip()) and len(re.sub(r"\D", "", query)) >= 3)
     for i in range(start, doc.page_count if stop is None else min(stop, doc.page_count)):
         pg = doc[i]
-        found = pg.search_for(query)
-        if not found:
-            numeric_hits = _numeric_ocr_hits(pg, query)
-            if not numeric_hits:
-                numeric_hits = _numeric_ocr_char_hits(pg, query)
-            for rect, snippet in numeric_hits:
+        if numeric_query:
+            # Numeric OCR searches need glyph-level recovery when scanners split
+            # digits into spans or confuse similar characters. Do one extraction
+            # per page; search_for + words + rawdict was doing up to three.
+            for rect, snippet in _numeric_ocr_char_hits(pg.get_text("rawdict"), query):
                 hits.append({"page": i, "rect": _to_view(pg, rect), "snippet": snippet})
             if len(hits) >= SEARCH_LIMIT:
                 hits = hits[:SEARCH_LIMIT]
                 break
+            continue
+        found = pg.search_for(query)
+        if not found:
             continue
         words, lines = [], {}
         if found:
