@@ -618,7 +618,7 @@ def _numeric_text_near_match(page, query: str) -> bool:
 def _cheque_crop_numeric_hits(page, query: str) -> list[tuple[fitz.Rect, str]]:
     """Re-OCR the cheque number box when noisy monochrome page OCR missed long IDs."""
     target = re.sub(r"\D", "", query)
-    if len(target) < 8 or page.rect.width < page.rect.height * 1.4:
+    if len(target) < 6 or page.rect.width < page.rect.height * 1.4:
         return []
     tesseract = shutil.which("tesseract")
     if not tesseract:
