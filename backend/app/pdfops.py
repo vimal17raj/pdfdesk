@@ -594,6 +594,90 @@ def _numeric_text_might_match(page, query: str) -> bool:
     return target in re.sub(r"\D", "", text.translate(confusables))
 
 
+def _numeric_text_near_match(page, query: str) -> bool:
+    """Find OCR lines close enough to justify a slower cheque-field re-read."""
+    target = re.sub(r"\D", "", query)
+    confusables = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "|": "1",
+                                "S": "5", "s": "5", "B": "8", "Z": "2", "z": "2", "G": "6"})
+    for line in page.get_text("text").splitlines():
+        digits = re.sub(r"\D", "", line.translate(confusables))
+        if abs(len(digits) - len(target)) > 2:
+            continue
+        if difflib.SequenceMatcher(None, target, digits).ratio() >= 0.72:
+            return True
+        # OCR may merge nearby printed amounts with the check number on one line.
+        # Compare target-sized windows so surrounding digits do not hide a near hit.
+        lo, hi = max(1, len(target) - 2), min(len(digits), len(target) + 2)
+        for size in range(lo, hi + 1):
+            for start in range(max(0, len(digits) - size + 1)):
+                if difflib.SequenceMatcher(None, target, digits[start:start + size]).ratio() >= 0.72:
+                    return True
+    return False
+
+
+def _cheque_crop_numeric_hits(page, query: str) -> list[tuple[fitz.Rect, str]]:
+    """Re-OCR the cheque number box when noisy monochrome page OCR missed long IDs."""
+    target = re.sub(r"\D", "", query)
+    if len(target) < 8 or page.rect.width < page.rect.height * 1.4:
+        return []
+    tesseract = shutil.which("tesseract")
+    if not tesseract:
+        return []
+
+    # Cheque leaves in these scans are landscape. Their printed check number is
+    # near the upper-right corner; isolating that area removes the security
+    # background that causes whole-page OCR to drop or replace digits.
+    bounds = page.rect
+    region = fitz.Rect(bounds.x0 + bounds.width * 0.64, bounds.y0 + bounds.height * 0.12,
+                       bounds.x1, bounds.y0 + bounds.height * 0.46)
+    scale = 600 / 72
+    try:
+        image = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=region,
+                                colorspace=fitz.csGRAY, alpha=False)
+        proc = subprocess.run(
+            [tesseract, "stdin", "stdout", "--psm", "11", "tsv", "-c", "tessedit_char_whitelist=0123456789"],
+            input=image.tobytes("png"), capture_output=True, timeout=15,
+        )
+        if proc.returncode:
+            return []
+
+        hits = []
+        rows = proc.stdout.decode("utf-8", errors="replace").splitlines()
+        for row in rows[1:]:
+            fields = row.split("\t")
+            if len(fields) < 12 or fields[0] != "5":
+                continue
+            raw = fields[11]
+            digits = re.sub(r"\D", "", raw)
+            if len(digits) < 6:
+                continue
+            x, y, w, h = (int(fields[i]) for i in (6, 7, 8, 9))
+            candidate = fitz.Rect(region.x0 + x / scale, region.y0 + y / scale,
+                                  region.x0 + (x + w) / scale, region.y0 + (y + h) / scale)
+            if target in digits:
+                hits.append((candidate, raw))
+                continue
+            # Sparse OCR often sees a near-match (for example, drops the first
+            # digit). Re-run just that small word with a digits-only recognizer.
+            if abs(len(digits) - len(target)) > 2 or difflib.SequenceMatcher(None, target, digits).ratio() < 0.72:
+                continue
+            pad = max(2.0, (candidate.y1 - candidate.y0) * 0.3)
+            candidate = fitz.Rect(max(bounds.x0, candidate.x0 - pad), max(bounds.y0, candidate.y0 - pad),
+                                  min(bounds.x1, candidate.x1 + pad), min(bounds.y1, candidate.y1 + pad))
+            refined = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=candidate,
+                                      colorspace=fitz.csGRAY, alpha=False)
+            proc = subprocess.run(
+                [tesseract, "stdin", "stdout", "--psm", "8", "-c", "tessedit_char_whitelist=0123456789"],
+                input=refined.tobytes("png"), capture_output=True, timeout=15,
+            )
+            recognized = re.sub(r"\D", "", proc.stdout.decode("utf-8", errors="replace"))
+            if proc.returncode == 0 and target in recognized:
+                hits.append((candidate, recognized))
+        return hits
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
+        return []
+
+
 def search_text(data, query: str, start: int = 0, stop: int | None = None) -> list[dict]:
     """Stops at SEARCH_LIMIT matches so a common word in a 900-page file doesn't flood the browser.
     start/stop let the caller search a huge file in slices, so other requests aren't blocked meanwhile."""
@@ -603,9 +687,14 @@ def search_text(data, query: str, start: int = 0, stop: int | None = None) -> li
     for i in range(start, doc.page_count if stop is None else min(stop, doc.page_count)):
         pg = doc[i]
         if numeric_query:
+            page_hits = []
             if _numeric_text_might_match(pg, query):
                 for rect, snippet in _numeric_ocr_char_hits(pg.get_text("rawdict"), query):
-                    hits.append({"page": i, "rect": _to_view(pg, rect), "snippet": snippet})
+                    page_hits.append({"page": i, "rect": _to_view(pg, rect), "snippet": snippet})
+            if not page_hits and _numeric_text_near_match(pg, query):
+                page_hits = [{"page": i, "rect": _to_view(pg, rect), "snippet": snippet}
+                             for rect, snippet in _cheque_crop_numeric_hits(pg, query)]
+            hits.extend(page_hits)
             if len(hits) >= SEARCH_LIMIT:
                 hits = hits[:SEARCH_LIMIT]
                 break
