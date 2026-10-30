@@ -598,9 +598,9 @@ def _job_result(doc_id: str, u: dict, tmp: Path, base_version: int, name: str, s
 
 class Ocr(BaseModel):
     langs: str | None = None
-    force: bool = False
+    redo: bool = False
+    force: bool = False  # legacy API alias; now handled safely as redo-ocr
     deskew: bool = False
-    pagesegmode: int = 3
     pages: str | None = None  # e.g. "1-50" or "1,3,7-9"; empty = whole document
 
 
@@ -609,14 +609,12 @@ def run_ocr(doc_id: str, b: Ocr, u: dict = U):
     """Starts OCR in the background and returns a job; poll /api/jobs/{id}."""
     path, info = _doc(doc_id, u)
     langs, pages = pdfops.check_ocr_args(b.langs, b.pages)
-    if b.pagesegmode not in (3, 11):
-        raise HTTPException(400, "OCR mode must be standard (3) or forms/cheques (11)")
     base = info["rev"]
 
     def worker(job, cancelled):
         tmp = config.TMP_DIR / f"{job['id']}.pdf"
         try:
-            pdfops.ocr_file(path, tmp, langs, b.force, b.deskew, pages, cancelled, job["log"], b.pagesegmode)
+            pdfops.ocr_file(path, tmp, langs, b.redo or b.force, b.deskew, pages, cancelled, job["log"])
             return _job_result(doc_id, u, tmp, base, info["name"], "OCR", "ocr", f"langs={langs} pages={pages or 'all'}")
         finally:
             for f in (tmp, Path(job["log"]), Path(job["log"]).with_suffix(".progress.json")):

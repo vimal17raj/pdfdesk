@@ -434,19 +434,16 @@ def check_ocr_args(langs: str | None, pages: str | None) -> tuple[str, str | Non
     return langs, pages
 
 
-def ocr_file(src, dst, langs: str, force: bool, deskew: bool, pages: str | None, cancelled, log_path,
-             pagesegmode: int = 3) -> None:
+def ocr_file(src, dst, langs: str, redo: bool, deskew: bool, pages: str | None, cancelled, log_path) -> None:
     """Scanned PDF -> searchable PDF using OCRmyPDF (Tesseract). Runs as a job; polls `cancelled()` so it can be stopped.
-    Pages that already have text are skipped unless `force`."""
+    Existing OCR text is replaced only when requested; visible page artwork is preserved."""
     cmd = ["ocrmypdf", "-l", langs, "--output-type", "pdf", "--optimize", "0", "--jobs", str(config.OCR_JOBS)]
     progress_plugin = Path(os.getenv("PDFDESK_OCR_PROGRESS_PLUGIN", Path(__file__).with_name("ocr_progress_plugin.py")))
     if progress_plugin.is_file():
         cmd += ["--plugin", str(progress_plugin)]
-    cmd += ["--force-ocr"] if force else ["--skip-text"]
+    cmd += ["--redo-ocr"] if redo else ["--skip-text"]
     if deskew:
         cmd += ["--deskew"]
-    if pagesegmode != 3:
-        cmd += ["--tesseract-pagesegmode", str(pagesegmode)]
     if pages:
         cmd += ["--pages", pages]
     cmd += [str(src), str(dst)]

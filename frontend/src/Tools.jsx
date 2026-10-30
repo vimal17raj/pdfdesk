@@ -384,7 +384,7 @@ function JobStatus({ j, cancel, what }) {
 
 function OcrPanel({ doc, act, ctx, say }) {
   const { me, openDoc, run } = ctx;
-  const [v, setV] = useState({ langs: me.ocr_langs, force: false, deskew: false, pagesegmode: 3, pages: "" });
+  const [v, setV] = useState({ langs: me.ocr_langs, redo: false, deskew: false, pages: "" });
   const { job, start, cancel, running } = useJob(ctx, doc, say);
   const sc = useRef();
   const scan = (list) => run("Importing scans…", async () => {
@@ -397,14 +397,10 @@ function OcrPanel({ doc, act, ctx, say }) {
     <div className="stack">
       {!me.ocr && <div className="error">OCR engine is not installed on this server.</div>}
       <label>Languages<input value={v.langs} onChange={(e) => setV({ ...v, langs: e.target.value })} title="e.g. eng, eng+tam, eng+hin" /></label>
-      <label>Text layout<select value={v.pagesegmode} onChange={(e) => setV({ ...v, pagesegmode: Number(e.target.value) })}>
-        <option value={3}>Standard document</option>
-        <option value={11}>Forms, cheques, and receipts (better for isolated numbers)</option>
-      </select></label>
       <label className="chk"><input type="checkbox" checked={v.deskew} onChange={(e) => setV({ ...v, deskew: e.target.checked })} /> Straighten crooked pages (slower)</label>
-      <label className="chk"><input type="checkbox" checked={v.force} onChange={(e) => setV({ ...v, force: e.target.checked })} /> Re-OCR pages that already have text</label>
+      <label className="chk"><input type="checkbox" checked={v.redo} onChange={(e) => setV({ ...v, redo: e.target.checked })} /> Replace existing OCR text (keeps page artwork)</label>
       <label>Pages (blank = all {doc.pages.length})<input value={v.pages} placeholder="e.g. 1-50 or 1,3,7-9" onChange={(e) => setV({ ...v, pages: e.target.value })} /></label>
-      <p className="muted">Fast OCR is selected by default. Forms mode helps when text is scattered across a page. To retry one page with existing OCR text, enter its page number and enable “Re-OCR pages that already have text”.</p>
+      <p className="muted">Standard document OCR is selected. To replace OCR on one page, enter its page number and enable “Replace existing OCR text”.</p>
       {doc.pages.length > 100 && !v.pages.trim() && <div className="note warn">{doc.pages.length} pages is a long job — roughly a few seconds per page. Try a page range first (e.g. 1-20) to check the result.</div>}
       <button className="primary" disabled={!me.ocr || running} onClick={() => start(() => api.ocr(doc.id, v))}>Run OCR</button>
       <JobStatus j={job} cancel={cancel} what="OCR" />
