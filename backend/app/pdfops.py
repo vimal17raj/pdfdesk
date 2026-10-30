@@ -594,10 +594,11 @@ def _numeric_text_might_match(page, query: str) -> bool:
                                  "S": "5", "s": "5", "B": "8", "Z": "2", "z": "2", "G": "6"})
     # Plain text extraction is substantially cheaper than rawdict (which builds
     # a Python object for every glyph). Only likely matching pages need glyphs.
-    for line in page.get_text("text").splitlines():
-        if target in re.sub(r"\D", "", line.translate(confusables)):
-            return True
-    return False
+    # OCR can split one visual number across separate extracted lines/spans.
+    # Flattening only the cheap text strings avoids filtering out those pages;
+    # the glyph-level matcher still verifies the actual visual row afterwards.
+    text = page.get_text("text")
+    return target in re.sub(r"\D", "", text.translate(confusables))
 
 
 def search_text(data, query: str, start: int = 0, stop: int | None = None) -> list[dict]:
