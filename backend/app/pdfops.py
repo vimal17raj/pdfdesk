@@ -587,6 +587,19 @@ def _numeric_ocr_char_hits(rawdict: dict, query: str) -> list[tuple[fitz.Rect, s
     return hits
 
 
+def _numeric_text_might_match(page, query: str) -> bool:
+    """Cheaply screen text before the slower glyph-box extraction used for highlights."""
+    target = re.sub(r"\D", "", query)
+    confusables = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "|": "1",
+                                 "S": "5", "s": "5", "B": "8", "Z": "2", "z": "2", "G": "6"})
+    # Plain text extraction is substantially cheaper than rawdict (which builds
+    # a Python object for every glyph). Only likely matching pages need glyphs.
+    for line in page.get_text("text").splitlines():
+        if target in re.sub(r"\D", "", line.translate(confusables)):
+            return True
+    return False
+
+
 def search_text(data, query: str, start: int = 0, stop: int | None = None) -> list[dict]:
     """Stops at SEARCH_LIMIT matches so a common word in a 900-page file doesn't flood the browser.
     start/stop let the caller search a huge file in slices, so other requests aren't blocked meanwhile."""
@@ -596,11 +609,11 @@ def search_text(data, query: str, start: int = 0, stop: int | None = None) -> li
     for i in range(start, doc.page_count if stop is None else min(stop, doc.page_count)):
         pg = doc[i]
         if numeric_query:
-            # Numeric OCR searches need glyph-level recovery when scanners split
-            # digits into spans or confuse similar characters. Do one extraction
-            # per page; search_for + words + rawdict was doing up to three.
-            for rect, snippet in _numeric_ocr_char_hits(pg.get_text("rawdict"), query):
-                hits.append({"page": i, "rect": _to_view(pg, rect), "snippet": snippet})
+            # Screen all pages with lightweight text first; build glyph boxes
+            # only on pages whose OCR text could contain the requested number.
+            if _numeric_text_might_match(pg, query):
+                for rect, snippet in _numeric_ocr_char_hits(pg.get_text("rawdict"), query):
+                    hits.append({"page": i, "rect": _to_view(pg, rect), "snippet": snippet})
             if len(hits) >= SEARCH_LIMIT:
                 hits = hits[:SEARCH_LIMIT]
                 break
