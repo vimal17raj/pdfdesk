@@ -613,46 +613,52 @@ def _cheque_crop_numeric_hits(page, query: str) -> list[tuple[fitz.Rect, str]]:
     try:
         image = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=region,
                                 colorspace=fitz.csGRAY, alpha=False)
-        proc = subprocess.run(
-            [tesseract, "stdin", "stdout", "--psm", "11", "tsv", "-c", "tessedit_char_whitelist=0123456789"],
-            input=image.tobytes("png"), capture_output=True, timeout=15,
-        )
-        if proc.returncode:
-            return []
-
-        hits = []
-        rows = proc.stdout.decode("utf-8", errors="replace").splitlines()
-        for row in rows[1:]:
-            fields = row.split("\t")
-            if len(fields) < 12 or fields[0] != "5":
-                continue
-            raw = fields[11]
-            digits = re.sub(r"\D", "", raw)
-            if len(digits) < 6:
-                continue
-            x, y, w, h = (int(fields[i]) for i in (6, 7, 8, 9))
-            candidate = fitz.Rect(region.x0 + x / scale, region.y0 + y / scale,
-                                  region.x0 + (x + w) / scale, region.y0 + (y + h) / scale)
-            if target in digits:
-                hits.append((candidate, raw))
-                continue
-            # Sparse OCR often sees a near-match (for example, drops the first
-            # digit). Re-run just that small word with a digits-only recognizer.
-            if abs(len(digits) - len(target)) > 2 or difflib.SequenceMatcher(None, target, digits).ratio() < 0.72:
-                continue
-            pad = max(2.0, (candidate.y1 - candidate.y0) * 0.3)
-            candidate = fitz.Rect(max(bounds.x0, candidate.x0 - pad), max(bounds.y0, candidate.y0 - pad),
-                                  min(bounds.x1, candidate.x1 + pad), min(bounds.y1, candidate.y1 + pad))
-            refined = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=candidate,
-                                      colorspace=fitz.csGRAY, alpha=False)
+        image_bytes = image.tobytes("png")
+        # PSM 6 handles cheque fields laid out in a fixed block; PSM 11 is a
+        # fallback for sparse or scattered number text on other cheque styles.
+        for psm in ("6", "11"):
             proc = subprocess.run(
-                [tesseract, "stdin", "stdout", "--psm", "8", "-c", "tessedit_char_whitelist=0123456789"],
-                input=refined.tobytes("png"), capture_output=True, timeout=15,
+                [tesseract, "stdin", "stdout", "--psm", psm, "tsv", "-c", "tessedit_char_whitelist=0123456789"],
+                input=image_bytes, capture_output=True, timeout=15,
             )
-            recognized = re.sub(r"\D", "", proc.stdout.decode("utf-8", errors="replace"))
-            if proc.returncode == 0 and target in recognized:
-                hits.append((candidate, recognized))
-        return hits
+            if proc.returncode:
+                continue
+
+            hits = []
+            rows = proc.stdout.decode("utf-8", errors="replace").splitlines()
+            for row in rows[1:]:
+                fields = row.split("\t")
+                if len(fields) < 12 or fields[0] != "5":
+                    continue
+                raw = fields[11]
+                digits = re.sub(r"\D", "", raw)
+                if len(digits) < 6:
+                    continue
+                x, y, w, h = (int(fields[i]) for i in (6, 7, 8, 9))
+                candidate = fitz.Rect(region.x0 + x / scale, region.y0 + y / scale,
+                                      region.x0 + (x + w) / scale, region.y0 + (y + h) / scale)
+                if target in digits:
+                    hits.append((candidate, raw))
+                    continue
+                # Sparse OCR often sees a near-match (for example, drops the first
+                # digit). Re-run just that small word with a digits-only recognizer.
+                if abs(len(digits) - len(target)) > 2 or difflib.SequenceMatcher(None, target, digits).ratio() < 0.72:
+                    continue
+                pad = max(2.0, (candidate.y1 - candidate.y0) * 0.3)
+                candidate = fitz.Rect(max(bounds.x0, candidate.x0 - pad), max(bounds.y0, candidate.y0 - pad),
+                                      min(bounds.x1, candidate.x1 + pad), min(bounds.y1, candidate.y1 + pad))
+                refined = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=candidate,
+                                          colorspace=fitz.csGRAY, alpha=False)
+                proc = subprocess.run(
+                    [tesseract, "stdin", "stdout", "--psm", "8", "-c", "tessedit_char_whitelist=0123456789"],
+                    input=refined.tobytes("png"), capture_output=True, timeout=15,
+                )
+                recognized = re.sub(r"\D", "", proc.stdout.decode("utf-8", errors="replace"))
+                if proc.returncode == 0 and target in recognized:
+                    hits.append((candidate, recognized))
+            if hits:
+                return hits
+        return []
     except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
         return []
 
