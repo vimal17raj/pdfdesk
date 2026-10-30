@@ -512,13 +512,104 @@ def outline(data: bytes) -> list[dict]:
 SEARCH_LIMIT = 2000
 
 
+def _numeric_ocr_char_hits(rawdict: dict, query: str) -> list[tuple[fitz.Rect, str]]:
+    """Match digit sequences across OCR spans and whitespace, preserving a highlight box."""
+    target = re.sub(r"\D", "", query)
+    if len(target) < 3:
+        return []
+
+    confusables = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "|": "1",
+                                "S": "5", "s": "5", "B": "8", "Z": "2", "z": "2", "G": "6"})
+    rows = []
+    for block in rawdict.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            chars = [ch for span in line.get("spans", []) for ch in span.get("chars", [])]
+            if not chars:
+                continue
+            y0, y1 = line["bbox"][1], line["bbox"][3]
+            center = (y0 + y1) / 2
+            row = next((r for r in rows if abs(r[0] - center) <= max(2.0, min(r[1] - r[2], y1 - y0) * 0.4)), None)
+            if row is None:
+                row = [center, y1, y0, []]
+                rows.append(row)
+            else:
+                row[1] = max(row[1], y1)
+                row[2] = min(row[2], y0)
+            row[3].extend(chars)
+
+    hits = []
+    for row in rows:
+        chars = sorted(row[3], key=lambda ch: (ch["bbox"][0], ch["bbox"][1]))
+        cluster = []
+        previous = None
+
+        def flush():
+            if not cluster:
+                return
+            joined = "".join(ch[0] for ch in cluster)
+            offset = joined.find(target)
+            while offset >= 0:
+                boxes = [ch[1] for ch in cluster[offset:offset + len(target)]]
+                rect = fitz.Rect(min(b[0] for b in boxes), min(b[1] for b in boxes),
+                                 max(b[2] for b in boxes), max(b[3] for b in boxes))
+                snippet = "".join(ch.get("c", "") for ch in chars)[:200]
+                hits.append((rect, snippet))
+                offset = joined.find(target, offset + 1)
+
+        for ch in chars:
+            value = ch.get("c", "")
+            x0, y0, x1, y1 = ch["bbox"]
+            if value.isspace():
+                if previous is None or x0 - previous[2] > max(2.0, min(y1 - y0, previous[3] - previous[1]) * 2.0):
+                    flush()
+                    cluster.clear()
+                    previous = None
+                continue
+            normalized = value.translate(confusables)
+            if normalized not in "0123456789":
+                flush()
+                cluster.clear()
+                previous = None
+                continue
+            if previous is not None:
+                gap = x0 - previous[2]
+                max_gap = max(2.0, min(y1 - y0, previous[3] - previous[1]) * 2.0)
+                if gap > max_gap:
+                    flush()
+                    cluster.clear()
+            cluster.append((normalized, (x0, y0, x1, y1)))
+            previous = (x0, y0, x1, y1)
+        flush()
+    return hits
+
+
+def _numeric_text_might_match(page, query: str) -> bool:
+    """Use light text extraction to avoid glyph-by-glyph work on unrelated pages."""
+    target = re.sub(r"\D", "", query)
+    confusables = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "|": "1",
+                                "S": "5", "s": "5", "B": "8", "Z": "2", "z": "2", "G": "6"})
+    text = page.get_text("text")
+    return target in re.sub(r"\D", "", text.translate(confusables))
+
+
 def search_text(data, query: str, start: int = 0, stop: int | None = None) -> list[dict]:
     """Stops at SEARCH_LIMIT matches so a common word in a 900-page file doesn't flood the browser.
     start/stop let the caller search a huge file in slices, so other requests aren't blocked meanwhile."""
     doc = _open(data)
     hits = []
+    numeric_query = bool(re.fullmatch(r"[\d\s\-()./]+", query.strip()) and len(re.sub(r"\D", "", query)) >= 3)
     for i in range(start, doc.page_count if stop is None else min(stop, doc.page_count)):
         pg = doc[i]
+        if numeric_query:
+            if _numeric_text_might_match(pg, query):
+                for rect, snippet in _numeric_ocr_char_hits(pg.get_text("rawdict"), query):
+                    hits.append({"page": i, "rect": _to_view(pg, rect), "snippet": snippet})
+            if len(hits) >= SEARCH_LIMIT:
+                hits = hits[:SEARCH_LIMIT]
+                break
+            continue
         found = pg.search_for(query)
         words, lines = [], {}
         if found:
